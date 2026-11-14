@@ -46,7 +46,9 @@ try {
   scene.add(vrm.scene);
 
   // Arms down, as in the original. VRM 0.x models are mirrored on this axis.
-  const arm = vrm.meta?.metaVersion === '0' ? -1.3 : 1.3;
+  // 1.46 rad ≈ 84° below horizontal: close to the body, but with a little breathing room
+  // so elbows and hands clear the dress instead of passing through it.
+  const arm = vrm.meta?.metaVersion === '0' ? -1.46 : 1.46;
   vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = -arm;
   vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = arm;
 
@@ -55,13 +57,18 @@ try {
   const box = new THREE.Box3().setFromObject(vrm.scene);
   const span = box.max.y - box.min.y;
   const height = span > 0.3 && span < 20 ? span : 1.6; // guard against odd bounds
-  const chestY = box.min.y + height * 0.74; // she is framed from the waist up
-  camera.position.set(0, chestY + height * 0.06, height * 1.24);
+  // Frame the whole model with a little air around her, whatever proportions it has.
+  // The distance is worked out from the camera's own field of view, so a tall or short
+  // model, or a phone-shaped window, still shows all of her instead of cropping her.
+  const frameY = box.min.y + height * 0.70;
+  const vFov = THREE.MathUtils.degToRad(camera.fov);
+  const distance = (height * 0.82) / 2 / Math.tan(vFov / 2);
+  camera.position.set(0, frameY + height * 0.01, distance);
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, chestY, 0);
+  controls.target.set(0, frameY, 0);
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.minDistance = height * 0.4;
-  controls.maxDistance = height * 3.2;
+  controls.minDistance = distance * 0.3;
+  controls.maxDistance = distance * 2.6;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   vrmReady = true;
