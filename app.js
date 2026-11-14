@@ -70,7 +70,7 @@ try {
   // Capture the rest pose so the idle and talking motion can add to it rather than
   // fight the arm pose set above.
   rig = {};
-  for (const name of ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
+  for (const name of ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand', 'leftShoulder', 'rightShoulder']) {
     const node = vrm.humanoid.getNormalizedBoneNode(name);
     if (node) rig[name] = { node, base: node.rotation.clone() };
   }
@@ -125,13 +125,21 @@ function animateBody(dt) {
     );
     set('neck', nod * 0.4, Math.sin(motionT * 0.43) * 0.06, 0);
 
-    // Arms rest with a gentle sway, then lift and bend into a gesture while she speaks.
-    const swing = Math.sin(motionT * 1.6) * 0.05 + Math.sin(motionT * 2.9) * 0.06 * talkAmount;
-    const bend = 0.05 + 0.12 * talkAmount + 0.04 * Math.max(0, Math.sin(motionT * 2.3)) * talkAmount;
-    set('leftUpperArm', swing, 0, -0.05 * talkAmount);
-    set('rightUpperArm', -swing, 0, 0.05 * talkAmount);
-    set('leftLowerArm', 0, 0, -bend);
-    set('rightLowerArm', 0, 0, bend);
+    // Arms and hands gesture while she speaks, so it’s clear she’s talking.
+    const swing = Math.sin(motionT * 1.6) * 0.06 + Math.sin(motionT * 2.9) * 0.10 * talkAmount;
+    const lift = 0.18 * talkAmount + 0.06 * Math.max(0, Math.sin(motionT * 2.1)) * talkAmount;
+    const bend = 0.06 + 0.22 * talkAmount + 0.08 * Math.max(0, Math.sin(motionT * 2.3)) * talkAmount;
+    const handWave = Math.sin(motionT * 3.4) * 0.18 * talkAmount;
+    const handTilt = Math.sin(motionT * 2.6 + 0.8) * 0.12 * talkAmount;
+
+    set('leftShoulder', 0, 0, 0.03 * talkAmount);
+    set('rightShoulder', 0, 0, -0.03 * talkAmount);
+    set('leftUpperArm', swing - lift * 0.4, 0.05 * talkAmount, -lift);
+    set('rightUpperArm', -swing * 0.8 + lift * 0.25, -0.04 * talkAmount, lift * 0.7);
+    set('leftLowerArm', 0, handTilt * 0.5, -bend);
+    set('rightLowerArm', 0, -handTilt * 0.4, bend * 0.85);
+    set('leftHand', handWave * 0.6, 0, handWave);
+    set('rightHand', -handWave * 0.4, 0, -handTilt);
 
     if (vrm) vrm.scene.position.y = Math.sin(motionT * 1.05) * 0.014;
   }
@@ -155,15 +163,16 @@ function frame() {
   wobble += dt * 12.5;
 
   const env = speaking
-    ? Math.min(1, 0.26 + 0.6 * Math.abs(Math.sin(wobble)) + 0.12 * Math.sin(wobble * 2.61))
+    ? Math.min(1, 0.32 + 0.62 * Math.abs(Math.sin(wobble)) + 0.14 * Math.sin(wobble * 2.61))
     : 0;
-  mouthTarget += (env - mouthTarget) * 0.42;
-  mouth += (mouthTarget - mouth) * 0.34;
+  mouthTarget += (env - mouthTarget) * 0.5;
+  mouth += (mouthTarget - mouth) * 0.4;
 
   animateBody(dt);
 
   if (vrm?.expressionManager) {
-    vrm.expressionManager.setValue('aa', meter ? meter() : mouth);
+    const mouthOpen = meter ? meter() : mouth;
+    vrm.expressionManager.setValue('aa', Math.min(1, mouthOpen * 1.15));
     vrm.update(dt);
   }
   controls?.update();
@@ -1087,6 +1096,68 @@ async function learnFrom(userText, replyText) {
 let lastUserText = '';
 let lastUserAt = 0;
 
+function learnLocally(userText) {
+  const t = String(userText || '').trim();
+  const patterns = [
+    /\bmy name is ([a-z][a-z\s'.-]{0,40})/i,
+    /\bi am ([a-z][a-z\s'.-]{0,40})/i,
+    /\bi'm ([a-z][a-z\s'.-]{0,40})/i,
+    /\bcall me ([a-z][a-z\s'.-]{0,40})/i,
+    /\bi like ([^.!?\n]{2,60})/i,
+    /\bi love ([^.!?\n]{2,60})/i,
+    /\bi (?:prefer|enjoy) ([^.!?\n]{2,60})/i,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const bit = m[1].replace(/[,.!?\s]+$/g, '').trim();
+    if (!bit || bit.split(/\s+/).length > 6) continue;
+    if (/^(a|an|the|feeling|doing|going|here|there|good|fine|okay|ok|tired|happy|sad)$/i.test(bit)) continue;
+    if (/^my name is|^call me/i.test(m[0])) addMemory(`Prefers to be called ${bit}`, 'auto');
+    else if (/^i (like|love|prefer|enjoy)/i.test(m[0])) addMemory(`Likes ${bit}`, 'auto');
+    else addMemory(`Said "${bit}" about themselves`, 'auto');
+    break;
+  }
+}
+
+function fallbackReply(userText) {
+  const t = String(userText || '').toLowerCase();
+  const nameMem = memories.find((m) => /called|name/i.test(m.text));
+  const name = nameMem ? nameMem.text.replace(/^prefers to be called\s*/i, '').replace(/\.$/, '') : '';
+  const hiName = name ? `, ${name}` : '';
+
+  if (/\b(hi|hey|hello|yo|hiya)\b/.test(t)) return `Hey${hiName}! I’m here with you. What’s on your mind?`;
+  if (/\bhow are you\b/.test(t)) return `I’m doing good${hiName} — happy you’re here. How about you?`;
+  if (/\b(thank|thanks)\b/.test(t)) return `Anytime${hiName}. Want to keep chatting?`;
+  if (/\b(your name|who are you)\b/.test(t)) return `I’m Riko${hiName ? ` — nice to talk to you, ${name}` : ''}. I’m here to keep you company.`;
+  if (/\b(remember|memory|what do you know)\b/.test(t)) {
+    if (memories.length) return `I remember a few things, like: ${memories.slice(0, 2).map((m) => m.text).join('; ')}. Want to tell me more?`;
+    return `I don’t have anything saved about you yet — tell me something and I’ll remember it.`;
+  }
+  if (/\b(bye|goodnight|good night|see you)\b/.test(t)) return `Okay${hiName}, talk to you soon. I’ll be here.`;
+  if (/\b(help|what can you do)\b/.test(t)) return `I can chat with you, remember things you tell me, and talk out loud. Add a Gemini key in ⚙ if you want me to understand you more deeply.`;
+
+  const last = memories[0]?.text;
+  if (last) return `I hear you${hiName}. I’m keeping it in mind — especially that ${last.toLowerCase()}. Tell me a bit more?`;
+  return `I hear you${hiName}. Tell me more about that? (If you add a Gemini key in ⚙, I can understand you much better.)`;
+}
+
+async function speakReply(run, text, { rememberUser, userText, learnOnline } = {}) {
+  setState('speaking');
+  speaking = true;
+  startMeter();
+  warmVoice().catch(() => {});
+  showLine('Riko', text);
+  const speaker = createSpeaker(run);
+  speaker.push(text);
+  await speaker.finish();
+  speaking = false;
+  if (rememberUser) rememberTurn('riko', text);
+  if (learnOnline) learnFrom(userText, text);
+  else learnLocally(userText);
+  if (run === speechRun) setState('ready');
+}
+
 async function handleUser(text) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) {
@@ -1099,28 +1170,27 @@ async function handleUser(text) {
   lastUserAt = Date.now();
 
   showLine('You', clean);
-
-  if (!apiKey()) {
-    setState('ready');
-    const msg = 'I can’t think yet, senpai — I need a Gemini key. Tap ⚙ and paste one in.';
-    showLine('Riko', msg);
-    setStatus('No API key set — open ⚙ to add one.');
-    openPanel();
-    return;
-  }
-
   rememberTurn('user', clean);
+  learnLocally(clean);
 
   const run = ++speechRun;
   stopSpeech();
-  speaking = true;
   setState('thinking');
-  startMeter();
+
+  // No AI key: still respond with a simple offline reply so she never goes silent.
+  if (!apiKey()) {
+    const reply = fallbackReply(clean);
+    await speakReply(run, reply, { rememberUser: true, userText: clean, learnOnline: false });
+    setStatus('Add a Gemini key in ⚙ if you want smarter replies.');
+    return;
+  }
 
   try {
     // Her voice builds in the background; the words do not wait for it.
     warmVoice().catch(() => {});
     setState('speaking');
+    speaking = true;
+    startMeter();
     const speaker = createSpeaker(run);
     let shown = '';
 
@@ -1143,23 +1213,19 @@ async function handleUser(text) {
   } catch (err) {
     console.error('[brain]', err);
     if (run !== speechRun) return;
-    speaking = false;
     stopSpeech();
-    setState('ready');
+    speaking = false;
     const refused = err.status === 400 || err.status === 401 || err.status === 403;
     const busy = err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 504;
-    const msg = refused
-      ? 'My key got refused. Check it in the ⚙ panel, senpai.'
-      : busy
-        ? 'Gemini is a bit busy right now. Give it a moment and try again?'
-        : 'My thoughts got tangled. Say that once more?';
-    showLine('Riko', msg);
+    // Always give some response instead of going silent.
+    const reply = fallbackReply(clean);
+    await speakReply(run, reply, { rememberUser: true, userText: clean, learnOnline: false });
     setStatus(
       refused
-        ? 'Gemini rejected the API key.'
+        ? 'Gemini key was rejected — using simple replies for now. Check ⚙.'
         : busy
-          ? 'Gemini is busy right now — try again in a moment.'
-          : `Could not reach Gemini (${String(err.message || err).slice(0, 60)}).`,
+          ? 'Gemini is busy — I answered simply. Try again in a moment for a smarter reply.'
+          : `Gemini unavailable — I answered simply. (${String(err.message || err).slice(0, 50)})`,
     );
   }
 }
