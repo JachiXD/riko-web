@@ -1017,18 +1017,27 @@ async function streamRiko(onText) {
     generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 220 },
   };
 
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const transient = (status) => status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+
   const models = await getModels();
   let lastError;
   for (const model of models) {
-    try {
-      const answer = await streamModel(body, model, onText);
-      // remember the working model first next time
-      resolvedModels = [model, ...models.filter((m) => m !== model)];
-      return answer;
-    } catch (err) {
-      lastError = err;
-      if (err.status === 404) continue;
-      throw err;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const answer = await streamModel(body, model, onText);
+        // remember the working model first next time
+        resolvedModels = [model, ...models.filter((m) => m !== model)];
+        return answer;
+      } catch (err) {
+        lastError = err;
+        if (err.status === 404) break; // try next model
+        if (transient(err.status) && attempt === 0) {
+          await wait(1200);
+          continue;
+        }
+        throw err;
+      }
     }
   }
   // If everything 404'd, clear cache so we rediscover next time
@@ -1138,11 +1147,20 @@ async function handleUser(text) {
     stopSpeech();
     setState('ready');
     const refused = err.status === 400 || err.status === 401 || err.status === 403;
+    const busy = err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 504;
     const msg = refused
       ? 'My key got refused. Check it in the ⚙ panel, senpai.'
-      : 'My thoughts got tangled. Say that once more?';
+      : busy
+        ? 'Gemini is a bit busy right now. Give it a moment and try again?'
+        : 'My thoughts got tangled. Say that once more?';
     showLine('Riko', msg);
-    setStatus(refused ? 'Gemini rejected the API key.' : `Could not reach Gemini (${String(err.message || err).slice(0, 60)}).`);
+    setStatus(
+      refused
+        ? 'Gemini rejected the API key.'
+        : busy
+          ? 'Gemini is busy right now — try again in a moment.'
+          : `Could not reach Gemini (${String(err.message || err).slice(0, 60)}).`,
+    );
   }
 }
 
