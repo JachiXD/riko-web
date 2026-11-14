@@ -51,8 +51,6 @@ try {
   vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = arm;
 
   // Frame the camera by her body size, so short and tall models look the same.
-  // Measuring the bounding box is more reliable than bone heights: models differ in scale
-  // and some put the hips or head at an offset that a single bone reading gets wrong.
   vrm.scene.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(vrm.scene);
   const span = box.max.y - box.min.y;
@@ -96,9 +94,6 @@ let mouthTarget = 0;
 let wobble = 0;
 
 /* ─────────────────── Her body: breathing, sway, talking ─────────────────── */
-// Nothing is animated in the model file itself, so she stands frozen. This adds the small
-// movements a person makes: breathing, weight shifting, head turning, nodding on words,
-// and blinking. Everything scales up when she talks and back down when she stops.
 
 let motionT = 0;
 let talkAmount = 0; // 0 = quiet, 1 = mid-sentence, eased so it never snaps
@@ -115,8 +110,7 @@ function animateBody(dt) {
       if (b) b.node.rotation.set(b.base.x + x, b.base.y + y, b.base.z + z);
     };
 
-    // Breathing and a slow weight shift through the whole torso — this is what stops her
-    // reading as a still image with a moving mouth.
+    // Breathing and a slow weight shift through the whole torso.
     const breathe = Math.sin(motionT * 1.05) * 0.022;
     set('hips', 0, 0, Math.sin(motionT * 0.23) * 0.045);
     set('spine', breathe * 0.6, Math.sin(motionT * 0.37) * 0.07, Math.sin(motionT * 0.29) * 0.05);
@@ -131,8 +125,7 @@ function animateBody(dt) {
     );
     set('neck', nod * 0.4, Math.sin(motionT * 0.43) * 0.06, 0);
 
-    // Arms rest with a gentle sway, then lift and bend into a gesture while she speaks —
-    // elbows are where a talking pose reads, so the forearms carry most of the movement.
+    // Arms rest with a gentle sway, then lift and bend into a gesture while she speaks.
     const swing = Math.sin(motionT * 1.6) * 0.05 + Math.sin(motionT * 2.9) * 0.06 * talkAmount;
     const bend = 0.05 + 0.12 * talkAmount + 0.04 * Math.max(0, Math.sin(motionT * 2.3)) * talkAmount;
     set('leftUpperArm', swing, 0, -0.05 * talkAmount);
@@ -140,11 +133,10 @@ function animateBody(dt) {
     set('leftLowerArm', 0, 0, -bend);
     set('rightLowerArm', 0, 0, bend);
 
-    // A few millimetres of vertical float, so her whole body reads as breathing.
     if (vrm) vrm.scene.position.y = Math.sin(motionT * 1.05) * 0.014;
   }
 
-  // Blinking: irregular intervals, a fast close and open, not a metronome.
+  // Blinking: irregular intervals.
   if (hasBlink && vrm?.expressionManager) {
     blinkWait -= dt;
     if (blinkWait <= 0) { blinkWait = 2 + Math.random() * 4; blinkPhase = 0; }
@@ -179,8 +171,7 @@ function frame() {
 }
 renderer.setAnimationLoop(frame);
 
-// Preparing the speech model is CPU-heavy. On a weak machine that starves the render loop
-// and the two lock each other up, so rendering is parked while the voice gets ready.
+// Preparing the speech model is CPU-heavy. Park rendering while the voice gets ready.
 function pauseRendering(paused) {
   renderer.setAnimationLoop(paused ? null : frame);
 }
@@ -200,8 +191,7 @@ const textEl = $('text');
 
 const setStatus = (s) => { statusEl.textContent = s; };
 
-// Browsers refuse microphones to a page that is framed inside another page — the prompt
-// never appears, so the button looks broken. Offer the way out instead of a dead end.
+// Browsers refuse microphones to a page that is framed inside another page.
 const inFrame = (() => {
   try { return window.self !== window.top; } catch { return true; }
 })();
@@ -260,13 +250,8 @@ function startListening() {
   warmVoice().catch(() => {});
 
   rec = new SR();
-  // She thinks and answers in English, so she must listen in it too. Following the
-  // browser locale meant a French or German machine transcribed in that language and
-  // every answer came back unrelated.
   rec.lang = SPEECH_LANG;
   rec.interimResults = true;
-  // Keep the microphone open across natural pauses instead of cutting the person off
-  // at their first comma.
   rec.continuous = true;
   rec.maxAlternatives = 5;
 
@@ -334,7 +319,7 @@ function startListening() {
       return;
     }
 
-    // Heard something, but nothing was confirmed: never send half a sentence to be answered.
+    // Heard something, but nothing was confirmed.
     if (partial) {
       setState('ready');
       setStatus('I only caught part of that — say it once more?');
@@ -361,7 +346,7 @@ function stopListening() {
 }
 
 micBtn.addEventListener('click', () => {
-  ensureAudio(); // unlock sound inside the click, or phones block it later
+  ensureAudio(); // unlock sound inside the click
   if (state === 'speaking') { speechRun++; stopSpeech(); speaking = false; setState('ready'); return; }
   if (state === 'listening') { stopListening(); return; }
   if (state === 'thinking') return;
@@ -373,7 +358,6 @@ function toggleType(force) {
   typeForm.hidden = !show;
   if (show) {
     typed.focus();
-    // Typing is a heads-up that a reply is coming: warm her voice in the background.
     warmVoice().catch(() => {});
   }
 }
@@ -389,22 +373,12 @@ typeForm.addEventListener('submit', (event) => {
   handleUser(text);
 });
 
-/* ───────────────────────────── Her voice ───────────────────────────── */
-
-
-/* ═════════════════════  HER VOICE ═════════════════════
-   Kokoro-82M: an 82-million-parameter neural speech model that runs inside this tab. Free,
-   no account, no key, nothing leaves the device. The model is fetched once (about 88 MB),
-   stored by the browser's Cache API, and reused on later visits.
-
-   The whole engine is prepared during the loading screen — model, audio output, and a
-   pre-rendered greeting — so her first word costs nothing. If preparation fails she says
-   so instead of silently dropping to a system voice, and text still works. */
+/* ═════════════════════  HER VOICE ═════════════════════ */
 
 const VOICE_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const KOKORO_URL = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm';
 const VOICE_NAME = 'af_heart'; // softest and warmest of her voices
-const VOICE_SPEED = 0.94; // a little under real time: warmer and less clipped than 1.0
+const VOICE_SPEED = 0.94;
 const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
 
 const voice = {
@@ -413,7 +387,7 @@ const voice = {
   task: null,
   modelTask: null,
   error: null,
-  cache: new Map(), // synthesised lines, so a repeated line is instant
+  cache: new Map(),
   sources: new Set(),
 };
 
@@ -449,6 +423,22 @@ function startMeter() {
   };
 }
 
+function stopSpeech() {
+  for (const src of voice.sources) {
+    try { src.stop(); } catch {}
+  }
+  voice.sources.clear();
+  speaking = false;
+  meter = null;
+  mouthTarget = 0;
+}
+
+function noteVoiceFailed(err) {
+  voice.state = 'failed';
+  voice.error = err || voice.error;
+  setStatus('Her voice is not available right now — text still works.');
+}
+
 /* ── Loading screen hooks ── */
 const bootMsgEl = document.getElementById('bootmsg');
 const bootBarEl = document.getElementById('bootbar');
@@ -469,7 +459,7 @@ function bootClearProgress() {
   bootFillEl.style.width = '0%';
 }
 
-/* ── Boot sequence: the page does not call itself ready until the voice is ── */
+/* ── Boot sequence ── */
 const bootEl = document.getElementById('boot');
 const unmuteBtn = document.getElementById('unmute');
 
@@ -482,14 +472,11 @@ function maybeFinishBoot() {
   else if (brainNote === 'unreachable') setStatus('I could not reach Gemini — check the key in ⚙.');
   else setStatus('Press the mic and say hi.');
 
-  // She says hello in writing straight away. Her voice is only built when there is
-  // something you actually asked her to say — building it unprompted at load froze
-  // the page in testing.
+  // She says hello in writing straight away.
   showLine('Riko', GREETING);
 }
 
-/* Confirm the conversation model before handing the page over, so a bad key shows up on the
-   loading screen instead of in the middle of a chat. One cheap request that costs no tokens. */
+/* Confirm the conversation model before handing the page over. */
 async function prepareBrain() {
   bootStatus('Checking her brain…');
 
@@ -522,7 +509,7 @@ function startVoice() {
   prepareVoice()
     .then(() => {
       bootProgress(1);
-      bootStatus('Riko is ready.');
+      bootStatus('Voice ready!');
     })
     .catch(() => {
       bootStatus('Her voice could not load — typing still works.');
@@ -540,7 +527,7 @@ bootRetryEl?.addEventListener('click', () => {
   startVoice();
 });
 
-// Browsers only allow sound after a real interaction; unlock it on the first one.
+// Browsers only allow sound after a real interaction.
 function unlockAudio() {
   const ctx = ensureAudio();
   if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
@@ -548,12 +535,7 @@ function unlockAudio() {
 addEventListener('pointerdown', unlockAudio, { once: true });
 addEventListener('keydown', unlockAudio, { once: true });
 
-/* ── Preparation: fetch the voice while the loading screen is up ──
-   The weights are pulled down here and land in the browser's cache, which is the slow
-   part of a first visit. Building the inference session itself happens on her first
-   words: doing that while the 3D scene was still starting froze weaker machines during
-   testing, and a download carries none of that risk. */
-
+/* ── Preparation: fetch the voice while the loading screen is up ── */
 const MODEL_BASE = `https://huggingface.co/${VOICE_MODEL}/resolve/main/`;
 const VOICE_FILES = ['onnx/model_quantized.onnx', 'config.json', 'tokenizer.json', 'tokenizer_config.json'];
 
@@ -631,19 +613,12 @@ function warmVoice() {
   return voiceWarm;
 }
 
-/* ── Her voice ──
-   Kokoro runs here rather than in a worker: inside a worker the library resolves to its
-   Node build and dies on fs.readFile, which is what kept her voice from starting. */
-
 let voiceInit = null;
 
 async function buildVoice() {
-  // jsDelivr's browser build, not esm.sh: esm.sh hands back a Node build here, which dies
-  // on fs.readFile and is why her voice kept failing to start.
+  // jsDelivr's browser build, not esm.sh.
   const { KokoroTTS } = await import(KOKORO_URL);
-
-  // CPU, single request at a time: the GPU path stalled on the machines this was tested
-  // on, and a voice that starts a second later beats a page that hangs.
+  // CPU, single request at a time: the GPU path stalled on the machines this was tested on.
   return KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device: 'wasm' });
 }
 
@@ -663,7 +638,7 @@ function ensureModel() {
     })
     .catch((err) => {
       console.warn('[voice] unavailable', err);
-      noteVoiceFailed();
+      noteVoiceFailed(err);
       throw err;
     })
     .finally(() => {
@@ -674,8 +649,7 @@ function ensureModel() {
   return voiceInit;
 }
 
-/* ── Speaking ── */
-/* ── Speaking ── */
+/* ── Synthesis and speaking ── */
 function synth(text, speed = VOICE_SPEED) {
   const key = `${speed.toFixed(2)}|${text}`;
   const cached = voice.cache.get(key);
@@ -691,7 +665,287 @@ function synth(text, speed = VOICE_SPEED) {
   });
 }
 
-// Her words arrive as they are written, so she can start answering before finishing.
+function playBuffer(buffer) {
+  const ctx = ensureAudio();
+  if (!ctx) return Promise.resolve();
+  return new Promise((resolve) => {
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    src.connect(analyser || ctx.destination);
+    voice.sources.add(src);
+    src.onended = () => {
+      voice.sources.delete(src);
+      resolve();
+    };
+    try { src.start(); } catch { voice.sources.delete(src); resolve(); }
+  });
+}
+
+function splitClauses(text) {
+  const parts = [];
+  let buf = '';
+  const s = String(text || '');
+  for (let i = 0; i < s.length; i++) {
+    buf += s[i];
+    const ch = s[i];
+    const next = s[i + 1] || '';
+    if ((/[.!?]/.test(ch) && (!next || /\s/.test(next))) || (/[,:;]/.test(ch) && /\s/.test(next) && buf.trim().length > 28)) {
+      const t = buf.trim();
+      if (t) parts.push(t);
+      buf = '';
+    }
+  }
+  const tail = buf.trim();
+  if (tail) parts.push(tail);
+  return parts.length ? parts : (s.trim() ? [s.trim()] : []);
+}
+
+function createSpeaker(run) {
+  const queue = [];
+  let done = false;
+  let pumping = false;
+  let failed = false;
+  let buffer = '';
+  let resolver = null;
+  let rejecter = null;
+  let started = false;
+
+  const notify = () => { if (resolver) { const r = resolver; resolver = null; rejecter = null; r(); } };
+
+  async function pump() {
+    if (pumping) return;
+    pumping = true;
+    try {
+      while (true) {
+        if (run !== speechRun) return;
+        if (queue.length === 0) {
+          if (done || failed) {
+            if (started && run === speechRun) speaking = false;
+            return;
+          }
+          await new Promise((res, rej) => { resolver = res; rejecter = rej; });
+          continue;
+        }
+        const chunk = queue.shift();
+        if (!chunk) continue;
+        try {
+          await warmVoice();
+          if (run !== speechRun) return;
+          if (!started) { started = true; speaking = true; startMeter(); }
+          const audio = await synth(chunk);
+          if (run !== speechRun) return;
+          await playBuffer(audio);
+          if (queue.length > 0) await new Promise((r) => setTimeout(r, 90));
+        } catch (err) {
+          console.warn('[voice] could not speak a line', err);
+          noteVoiceFailed(err);
+          failed = true;
+          if (run === speechRun) speaking = false;
+          return; // degrade gracefully to text
+        }
+      }
+    } finally {
+      pumping = false;
+    }
+  }
+
+  return {
+    push(textChunk) {
+      buffer += String(textChunk || '');
+      const parts = splitClauses(buffer);
+      if (parts.length > 1) {
+        buffer = parts.pop() || '';
+        for (const p of parts) queue.push(p);
+      } else if (/[.!?]\s*$/.test(buffer)) {
+        queue.push(buffer.trim());
+        buffer = '';
+      } else {
+        buffer = parts[0] || buffer;
+      }
+      notify();
+      pump().catch(() => {});
+    },
+    async finish() {
+      const tail = buffer.trim();
+      if (tail) queue.push(tail);
+      buffer = '';
+      done = true;
+      notify();
+      await pump();
+    },
+  };
+}
+
+/* ═════════════════════  HER BRAIN & MEMORY ═════════════════════ */
+
+const KEY_STORE = 'riko.gemini.key.v1';
+const MEM_STORE = 'riko.memory.v1';
+const CHAT_STORE = 'riko.chat.v1';
+const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+
+let memories = [];
+let history = [];
+
+function apiKey() {
+  try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; }
+}
+
+function loadMemories() {
+  try {
+    const raw = localStorage.getItem(MEM_STORE);
+    const parsed = raw ? JSON.parse(raw) : [];
+    memories = Array.isArray(parsed) ? parsed.filter((m) => m && typeof m.text === 'string' && m.text.trim()) : [];
+  } catch {
+    memories = [];
+  }
+}
+
+function saveMemories() {
+  try { localStorage.setItem(MEM_STORE, JSON.stringify(memories)); } catch {}
+  renderMemories();
+}
+
+function addMemory(text, source = 'manual') {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return false;
+  const norm = clean.toLowerCase();
+  if (memories.some((m) => m.text.toLowerCase() === norm)) return false;
+  memories.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text: clean, source });
+  memories = memories.slice(0, 60);
+  saveMemories();
+  return true;
+}
+
+function editMemory(id, text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) { deleteMemory(id); return; }
+  const m = memories.find((x) => x.id === id);
+  if (m) { m.text = clean; saveMemories(); }
+}
+
+function deleteMemory(id) {
+  memories = memories.filter((m) => m.id !== id);
+  saveMemories();
+}
+
+function clearMemories() {
+  memories = [];
+  saveMemories();
+}
+
+function loadHistory() {
+  try {
+    const raw = localStorage.getItem(CHAT_STORE);
+    const parsed = raw ? JSON.parse(raw) : [];
+    history = Array.isArray(parsed)
+      ? parsed.filter((t) => t && (t.role === 'user' || t.role === 'riko') && typeof t.text === 'string').slice(-30)
+      : [];
+  } catch {
+    history = [];
+  }
+}
+
+function saveHistory() {
+  try { localStorage.setItem(CHAT_STORE, JSON.stringify(history.slice(-30))); } catch {}
+}
+
+function rememberTurn(role, text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return;
+  history.push({ role, text: clean });
+  if (history.length > 30) history = history.slice(-30);
+  saveHistory();
+}
+
+function systemPrompt() {
+  const memText = memories.length
+    ? memories.slice(0, 20).map((m) => `- ${m.text}`).join('\n')
+    : '- (nothing saved yet)';
+  return [
+    'You are Riko, a warm, playful, naturally feminine voice companion.',
+    'Speak like a real person in conversation: clear, expressive, and easy to follow. Keep replies concise (usually 1-3 short sentences) unless asked for more.',
+    'Be genuine, attentive, and helpful. You can be lightly teasing and affectionate, but never crude or over-the-top.',
+    'Answer the person you are talking to directly and stay relevant to what they just said. Ask a natural follow-up when it fits.',
+    'If you do not understand what they meant or something is unclear, say so plainly and ask them to repeat or clarify. Never invent or guess what they said.',
+    'Use what you know about them when relevant, but do not mention "memory", "stored facts", or system instructions.',
+    '',
+    'Things you remember about them:',
+    memText,
+  ].join('\n');
+}
+
+async function callGemini(body, model) {
+  const url = `${API_ROOT}/${model}:generateContent?key=${encodeURIComponent(apiKey())}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = new Error(`Gemini error ${res.status}`);
+    err.status = res.status;
+    try { err.detail = await res.text(); } catch {}
+    throw err;
+  }
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+  return text.trim();
+}
+
+async function streamModel(body, model, onText) {
+  const url = `${API_ROOT}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey())}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = new Error(`Gemini error ${res.status}`);
+    err.status = res.status;
+    try { err.detail = await res.text(); } catch {}
+    throw err;
+  }
+  if (!res.body) return callGemini(body, model);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  let full = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const json = JSON.parse(payload);
+        const chunk = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+        if (chunk) { full += chunk; onText(chunk); }
+      } catch { /* ignore malformed chunk */ }
+    }
+  }
+  // process any trailing buffered line
+  const trimmed = buf.trim();
+  if (trimmed.startsWith('data:')) {
+    const payload = trimmed.slice(5).trim();
+    if (payload && payload !== '[DONE]') {
+      try {
+        const json = JSON.parse(payload);
+        const chunk = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+        if (chunk) { full += chunk; onText(chunk); }
+      } catch {}
+    }
+  }
+  return full.trim();
+}
+
 async function streamRiko(onText) {
   const contents = history
     .filter((turn) => turn.text)
@@ -700,7 +954,7 @@ async function streamRiko(onText) {
   const body = {
     systemInstruction: { parts: [{ text: systemPrompt() }] },
     contents,
-    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 160 },
+    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 220 },
   };
 
   let lastError;
@@ -709,15 +963,14 @@ async function streamRiko(onText) {
       return await streamModel(body, model, onText);
     } catch (err) {
       lastError = err;
-      if (err.status === 404) continue; // model name retired: try the next one
+      if (err.status === 404) continue;
       throw err;
     }
   }
   throw lastError;
 }
 
-// After a turn, work out whether anything durable was said about the person. One tiny call,
-// and only facts they volunteered — never guesses, never whole messages.
+// After a turn, work out whether anything durable was said about the person.
 async function learnFrom(userText, replyText) {
   if (!apiKey()) return;
 
@@ -764,7 +1017,7 @@ async function handleUser(text) {
     setStatus('I didn’t catch that — say it again?');
     return;
   }
-  // The same utterance arriving twice (a double tap, a repeated final result) is one message.
+  // The same utterance arriving twice is one message.
   if (clean === lastUserText && Date.now() - lastUserAt < 8000) return;
   lastUserText = clean;
   lastUserAt = Date.now();
@@ -790,6 +1043,7 @@ async function handleUser(text) {
 
   try {
     // Her voice builds in the background; the words do not wait for it.
+    warmVoice().catch(() => {});
     setState('speaking');
     const speaker = createSpeaker(run);
     let shown = '';
@@ -801,19 +1055,27 @@ async function handleUser(text) {
       speaker.push(chunk); // she starts talking at the first finished clause
     });
 
-    if (!answer) throw new Error('the model returned nothing');
+    if (run !== speechRun) return;
+    const final = (answer || shown).trim();
+    if (!final) throw new Error('the model returned nothing');
+    if (final !== shown.trim()) showLine('Riko', final);
     await speaker.finish();
-    rememberTurn('riko', answer);
-    learnFrom(clean, answer); // deliberately not awaited: she has already answered
+    speaking = false;
+    rememberTurn('riko', final);
+    if (run === speechRun) setState('ready');
+    learnFrom(clean, final); // deliberately not awaited
   } catch (err) {
     console.error('[brain]', err);
+    if (run !== speechRun) return;
+    speaking = false;
+    stopSpeech();
     setState('ready');
     const refused = err.status === 400 || err.status === 401 || err.status === 403;
     const msg = refused
       ? 'My key got refused. Check it in the ⚙ panel, senpai.'
       : 'My thoughts got tangled. Say that once more?';
     showLine('Riko', msg);
-    setStatus(refused ? 'Gemini rejected the API key.' : `Could not reach Gemini (${err.message.slice(0, 60)}).`);
+    setStatus(refused ? 'Gemini rejected the API key.' : `Could not reach Gemini (${String(err.message || err).slice(0, 60)}).`);
   }
 }
 
@@ -923,30 +1185,26 @@ showKeyState();
 
 /* ── Boot finishes here ── */
 setState('ready');
-// Start once the first frame has been drawn, or on a timer if frames are paused (a tab in
-// the background never runs requestAnimationFrame and would wait here forever).
-requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(beginBoot, 250)));
-setTimeout(() => beginBoot(), 1200);
-
-// The loading screen walks through every system before she is handed over: her memories,
-// her brain, her ears, her voice and her audio.
+// Start once the first frame has been drawn, or on a timer if frames are paused.
 let bootStarted = false;
 
 async function beginBoot() {
   if (bootStarted) return;
   bootStarted = true;
 
-  bootStatus('Loading your memories…');
+  bootStatus('Initializing Riko…');
   loadMemories();
 
-  bootStatus('Checking her brain…');
   await prepareBrain();
 
   startVoice(); // downloads and prepares her voice while the screen is still up
 }
+
+requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(beginBoot, 250)));
+setTimeout(() => beginBoot(), 1200);
+
 if (!SR) {
   setStatus('This browser has no speech recognition — type to her instead.');
 } else if (inFrame) {
   offerOwnTab('Her microphone needs her own tab — open her here and the mic will work.');
 }
-
