@@ -44,14 +44,20 @@ try {
   vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = -arm;
   vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = arm;
 
-  // Frame the camera by her head height, so short and tall models look the same.
-  const headY = vrm.humanoid.getNormalizedBoneNode('head').getWorldPosition(new THREE.Vector3()).y;
-  camera.position.set(0, headY * 0.94, headY * 1.37);
+  // Frame the camera by her body size, so short and tall models look the same.
+  // Measuring the bounding box is more reliable than bone heights: models differ in scale
+  // and some put the hips or head at an offset that a single bone reading gets wrong.
+  vrm.scene.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(vrm.scene);
+  const span = box.max.y - box.min.y;
+  const height = span > 0.3 && span < 20 ? span : 1.6; // guard against odd bounds
+  const chestY = box.min.y + height * 0.74; // she is framed from the waist up
+  camera.position.set(0, chestY + height * 0.06, height * 1.24);
   controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, headY * 0.9, 0);
+  controls.target.set(0, chestY, 0);
   controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.minDistance = 0.5;
-  controls.maxDistance = 5;
+  controls.minDistance = height * 0.4;
+  controls.maxDistance = height * 3.2;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   document.getElementById('boot').classList.add('gone');
