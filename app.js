@@ -506,18 +506,34 @@ async function prepareBrain() {
 
 function startVoice() {
   voiceSettled = false;
+  const settle = () => {
+    if (voiceSettled) return;
+    voiceSettled = true;
+    maybeFinishBoot();
+  };
+
+  // Never let a slow or blocked voice download trap her on the loading screen.
+  const guard = setTimeout(() => {
+    if (voiceSettled) return;
+    bootStatus('Her voice is taking too long — starting without it. Text still works.');
+    if (bootRetryEl) bootRetryEl.hidden = false;
+    settle();
+  }, 30000);
+
   prepareVoice()
     .then(() => {
+      if (voiceSettled) return;
       bootProgress(1);
       bootStatus('Voice ready!');
     })
     .catch(() => {
+      if (voiceSettled) return;
       bootStatus('Her voice could not load — typing still works.');
       if (bootRetryEl) bootRetryEl.hidden = false;
     })
     .finally(() => {
-      voiceSettled = true;
-      maybeFinishBoot();
+      clearTimeout(guard);
+      settle();
     });
 }
 
@@ -549,6 +565,9 @@ function prepareVoice() {
   bootStatus('Preparing voice…');
   bootProgress(0);
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+
   voice.task = (async () => {
     bootStatus('Initializing audio…');
     ensureAudio();
@@ -560,7 +579,7 @@ function prepareVoice() {
     await Promise.all(
       VOICE_FILES.map(async (file) => {
         try {
-          const res = await fetch(MODEL_BASE + file);
+          const res = await fetch(MODEL_BASE + file, { signal: controller.signal });
           if (!res.ok) return;
           const total = Number(res.headers.get('content-length') || 0);
           if (!res.body || !total) {
@@ -594,6 +613,7 @@ function prepareVoice() {
       throw err;
     })
     .finally(() => {
+      clearTimeout(timeout);
       voice.task = null;
     });
 
