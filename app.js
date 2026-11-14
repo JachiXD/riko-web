@@ -630,366 +630,104 @@ function warmVoice() {
   return voiceWarm;
 }
 
+/* ── Her voice lives on its own thread ──
+   Building the speech model on the page's thread froze everything, so it happens in a
+   worker instead: the page stays usable, and if the worker never answers it is killed. */
+
+function ensureVoiceWorker() {
+  if (voice.worker) return voice.worker;
+
+  const worker = new Worker('./voice-worker.js', { type: 'module' });
+
+  worker.onmessage = (event) => {
+    const msg = event.data || {};
+
+    if (msg.type === 'progress') {
+      voice.progress = msg.ratio;
+    } else if (msg.type === 'ready') {
+      clearTimeout(voice.timer);
+      voice.timer = null;
+      voice.state = 'ready';
+      voice.settle?.resolve();
+      voice.settle = null;
+    } else if (msg.type === 'audio') {
+      const job = voice.pending.get(msg.id);
+      voice.pending.delete(msg.id);
+      job?.resolve(msg);
+    } else if (msg.type === 'error' && msg.stage === 'speak') {
+      const job = voice.pending.get(msg.id);
+      voice.pending.delete(msg.id);
+      job?.reject(new Error(msg.message));
+    } else if (msg.type === 'error') {
+      failVoice(new Error(msg.message));
+    }
+  };
+
+  worker.onerror = (event) => failVoice(new Error(event.message || 'voice worker failed'));
+
+  voice.worker = worker;
+  return worker;
+}
+
+function failVoice(err) {
+  console.warn('[voice] could not start', err);
+  clearTimeout(voice.timer);
+  voice.timer = null;
+  voice.state = 'failed';
+  voice.error = err;
+  try { voice.worker?.terminate(); } catch { /* already gone */ }
+  voice.worker = null;
+  voice.pending.clear();
+  voice.settle?.reject(err);
+  voice.settle = null;
+}
+
 function ensureModel() {
-  if (voice.model) return Promise.resolve(voice.model);
+  if (voice.state === 'ready') return Promise.resolve();
   if (voice.modelTask) return voice.modelTask;
 
   setStatus('Preparing her voice…');
-  pauseRendering(true);
+  voice.state = 'loading';
 
-  voice.modelTask = (async () => {
-    const { KokoroTTS } = await import('kokoro-js');
-    const load = (device) => KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device });
-
-    const tryGpu = !!navigator.gpu && !voice.gpuBroken;
-    try {
-      voice.model = await load(tryGpu ? 'webgpu' : 'wasm');
-    } catch (err) {
-      console.warn('[voice] GPU path unavailable, using CPU', err);
-      voice.gpuBroken = tryGpu; // remember, so a retry does not stall on it again
-      voice.model = await load('wasm');
-    }
-
-    voice.state = 'ready';
-    return voice.model;
-  })()
+  voice.modelTask = new Promise((resolve, reject) => {
+    voice.settle = { resolve, reject };
+    ensureVoiceWorker().postMessage({ type: 'init' });
+    // A build that never finishes must not hold her answers hostage.
+    voice.timer = setTimeout(() => failVoice(new Error('voice preparation timed out')), 45000);
+  })
     .catch((err) => {
-      console.error('[voice] model failed to load', err);
-      voice.state = 'failed';
-      voice.error = err;
+      noteVoiceFailed();
       throw err;
     })
     .finally(() => {
       voice.modelTask = null;
-      pauseRendering(false);
     });
 
   return voice.modelTask;
 }
 
 /* ── Speaking ── */
+/* ── Speaking ── */
 function synth(text, speed = VOICE_SPEED) {
   const key = `${speed.toFixed(2)}|${text}`;
   const cached = voice.cache.get(key);
   if (cached) return Promise.resolve(cached);
 
-  return Promise.resolve(voice.model.generate(text, { voice: VOICE_NAME, speed })).then((audio) => {
+  const worker = ensureVoiceWorker();
+  const id = voice.nextId++;
+
+  return new Promise((resolve, reject) => {
+    voice.pending.set(id, { resolve, reject });
+    worker.postMessage({ type: 'speak', id, text, speed });
+  }).then(({ samples, rate }) => {
     const ctx = ensureAudio();
-    const buffer = ctx.createBuffer(1, audio.audio.length, audio.sampling_rate);
-    buffer.copyToChannel(audio.audio, 0);
+    const data = samples instanceof Float32Array ? samples : new Float32Array(samples);
+    const buffer = ctx.createBuffer(1, data.length, rate);
+    buffer.copyToChannel(data, 0);
     if (voice.cache.size > 80) voice.cache.clear();
     voice.cache.set(key, buffer);
     return buffer;
   });
-}
-
-// Splits a reply into sentences so each one is synthesised on its own. That is what gives
-// her somewhere to breathe: separate utterances, separate intonation, real gaps between them.
-function sentences(text) {
-  const parts = text.match(/[^.!?…]+[.!?…]*/g) || [text];
-  return parts
-    .flatMap((part) => {
-      const clean = part.trim();
-      // A long sentence gets a breath at its commas; short ones stay whole.
-      if (clean.length > 120) {
-        const clauses = clean.split(/,\s+/);
-        return clauses.map((clause, i) => (i < clauses.length - 1 ? `${clause},` : clause));
-      }
-      return clean;
-    })
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-// Loanwords spelled the way an English voice reads correctly.
-const SPELLING = [
-  [/\bsenpai\b/gi, 'sempai'],
-  [/\barigatou\b/gi, 'ah-ree-gah-toh'],
-  [/\bkonnichiwa\b/gi, 'kon-nee-chee-wah'],
-  [/\bsayonara\b/gi, 'sah-yoh-nah-rah'],
-  [/\bkawaii\b/gi, 'kah-wah-ee'],
-  [/\bonegai\b/gi, 'oh-neh-guy'],
-  [/\bitadakimasu\b/gi, 'ee-tah-dah-kee-mahs'],
-];
-
-function pronounce(text) {
-  return SPELLING.reduce((out, [re, say]) => out.replace(re, say), text);
-}
-
-function stopSpeech() {
-  meter = null;
-  for (const source of voice.sources) {
-    try { source.stop(); } catch { /* already finished */ }
-  }
-  voice.sources.clear();
-}
-
-// Speech is fed to her as the model writes it: the first clause is synthesised and starts
-// playing while the rest of the answer is still arriving, instead of waiting for the whole
-// reply and then the whole first sentence.
-function speechBoundary(text, final) {
-  const stop = text.match(/[.!?…](\s|$)/);
-  if (stop) return stop.index + 1;
-  if (text.length > 90) {
-    const clause = text.search(/[,;:]\s/);
-    if (clause > 20) return clause + 1;
-  }
-  return final && text.trim() ? text.length : -1;
-}
-
-let voiceFailureNoted = false;
-function noteVoiceFailed() {
-  if (voiceFailureNoted) return;
-  voiceFailureNoted = true;
-  setStatus('Her voice will not load on this device — she can still answer in text.');
-}
-
-function createSpeaker(run) {
-  const ctx = ensureAudio();
-  let pending = '';
-  let chain = Promise.resolve();
-  let clock = 0;
-
-  const speakPiece = async (piece) => {
-    if (run !== speechRun || !ctx) return;
-
-    try {
-      await warmVoice();
-    } catch (err) {
-      console.warn('[voice] unavailable, answering in text only', err);
-      noteVoiceFailed();
-      return;
-    }
-
-    const buffer = await synth(piece);
-    if (run !== speechRun) return;
-
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(analyser);
-    const at = Math.max(clock, ctx.currentTime + 0.03);
-    source.start(at);
-    voice.sources.add(source);
-    source.onended = () => voice.sources.delete(source);
-
-    clock = at + buffer.duration + (piece.trim().endsWith('?') ? 0.3 : 0.18);
-  };
-
-  const drain = (final) => {
-    for (;;) {
-      const cut = speechBoundary(pending, final);
-      if (cut < 0) return;
-      const piece = pending.slice(0, cut).trim();
-      pending = pending.slice(cut);
-      if (piece) chain = chain.then(() => speakPiece(piece));
-    }
-  };
-
-  return {
-    push(chunk) {
-      pending += chunk;
-      drain(false);
-    },
-    async finish() {
-      drain(true);
-      await chain;
-      if (ctx) {
-        // Stay "speaking" until the audio clock has actually run out.
-        await new Promise((resolve) => setTimeout(resolve, Math.max(0, (clock - ctx.currentTime) * 1000)));
-      }
-    },
-  };
-}
-
-/* ───────────────────────────── Her brain ───────────────────────────── */
-// A real language model (Gemini) called straight from the page, with a key that lives only
-// in this browser. Her memory is a small list of facts about you, also kept in this browser.
-
-const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash'];
-const KEY_STORE = 'riko.gemini.key.v1';
-const MEM_STORE = 'riko.memory.v1';
-const CHAT_STORE = 'riko.chat.v1';
-const MAX_TURNS = 14;
-
-function readStored(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStored(key, value) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* private browsing: nothing persists, but the conversation still works */
-  }
-}
-
-const apiKey = () => {
-  try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; }
-};
-
-/* ── Memory: facts worth keeping, never a transcript ── */
-let memories = [];
-
-function loadMemories() {
-  const saved = readStored(MEM_STORE, []);
-  memories = Array.isArray(saved) ? saved.filter((m) => m && typeof m.text === 'string') : [];
-  renderMemories();
-}
-
-const normalise = (text) => text.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
-
-function saveMemories() {
-  writeStored(MEM_STORE, memories);
-  renderMemories();
-}
-
-function addMemory(text, source = 'auto') {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
-  if (clean.length < 3) return false;
-  const key = normalise(clean);
-  if (!key) return false;
-  // Same fact twice, in slightly different words, is still one memory.
-  if (memories.some((m) => normalise(m.text) === key)) return false;
-  if (memories.some((m) => normalise(m.text).includes(key) || key.includes(normalise(m.text)) ) && key.length > 12) return false;
-
-  memories.unshift({
-    id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())),
-    text: clean,
-    source,
-    at: Date.now(),
-  });
-  if (memories.length > 60) memories.length = 60;
-  saveMemories();
-  return true;
-}
-
-function editMemory(id, text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
-  if (!clean) return deleteMemory(id);
-  const found = memories.find((m) => m.id === id);
-  if (found) {
-    found.text = clean;
-    found.at = Date.now();
-    saveMemories();
-  }
-}
-
-function deleteMemory(id) {
-  memories = memories.filter((m) => m.id !== id);
-  saveMemories();
-}
-
-function clearMemories() {
-  memories = [];
-  saveMemories();
-}
-
-/* ── Conversation: short-term context, kept across a refresh too ── */
-let history = [];
-
-function loadHistory() {
-  const saved = readStored(CHAT_STORE, []);
-  history = Array.isArray(saved) ? saved.filter((t) => t && typeof t.text === 'string').slice(-MAX_TURNS * 2) : [];
-}
-
-function rememberTurn(role, text) {
-  history.push({ role, text });
-  if (history.length > MAX_TURNS * 2) history = history.slice(-MAX_TURNS * 2);
-  writeStored(CHAT_STORE, history);
-}
-
-function systemPrompt() {
-  const facts = memories.slice(0, 40).map((m) => `- ${m.text}`).join('\n');
-
-  return [
-    'You are Riko: a warm, playful, naturally curious girl chatting with someone you are fond of.',
-    'How you talk:',
-    '- Like a real person in a live conversation, not an assistant writing an essay.',
-    '- Everything you write is spoken aloud, so keep it to one to three short sentences. No lists, no markdown, no emoji.',
-    '- React to the specific thing they just said, and to what came before in this conversation.',
-    '- Be a little teasing and playful sometimes, and genuinely curious other times. Never sound scripted.',
-    '- If you are not sure what they meant, say so and ask. Never invent what they said, and never pretend to remember something you were not told.',
-    '- If they ask something you do not know, admit it plainly instead of making something up.',
-    '- Answer in the language they used.',
-    facts
-      ? `What you remember about them from previous chats:\n${facts}\nUse these naturally when they matter. Do not recite them or list them.`
-      : 'You have no saved memories about them yet. Ask about them when it fits naturally.',
-  ].join('\n');
-}
-
-async function callGemini(body, model) {
-  const res = await fetch(`${API_ROOT}/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey() },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
-    err.status = res.status;
-    throw err;
-  }
-
-  const data = await res.json();
-  const parts = data?.candidates?.[0]?.content?.parts || [];
-  return parts.map((p) => p.text || '').join('').trim();
-}
-
-async function streamModel(body, model, onText) {
-  const res = await fetch(`${API_ROOT}/${model}:streamGenerateContent?alt=sse`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey() },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
-    err.status = res.status;
-    throw err;
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let full = '';
-
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-
-      try {
-        const json = JSON.parse(payload);
-        const parts = json?.candidates?.[0]?.content?.parts || [];
-        const text = parts.map((part) => part.text || '').join('');
-        if (text) {
-          full += text;
-          onText(text);
-        }
-      } catch {
-        /* a keep-alive or a split frame: ignore it */
-      }
-    }
-  }
-
-  return full.trim();
 }
 
 // Her words arrive as they are written, so she can start answering before finishing.
