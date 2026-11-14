@@ -802,7 +802,18 @@ const KEY_STORE = 'riko.gemini.key.v1';
 const MEM_STORE = 'riko.memory.v1';
 const CHAT_STORE = 'riko.chat.v1';
 const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const MODELS = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash'];
+const PREFERRED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-latest',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-latest',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+  'gemini-flash-latest',
+];
+let resolvedModels = null;
 
 let memories = [];
 let history = [];
@@ -966,6 +977,35 @@ async function streamModel(body, model, onText) {
   return full.trim();
 }
 
+async function discoverModels() {
+  try {
+    const res = await fetch(`${API_ROOT}?key=${encodeURIComponent(apiKey())}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const names = (data.models || [])
+      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
+      .map((m) => String(m.name || '').replace(/^models\//, ''))
+      .filter(Boolean);
+
+    const flash = names.filter((n) => /flash/i.test(n));
+    const ordered = [];
+    const add = (n) => { if (n && !ordered.includes(n)) ordered.push(n); };
+    for (const pref of PREFERRED_MODELS) add(flash.find((n) => n === pref) || flash.find((n) => n.startsWith(pref)));
+    for (const n of flash) add(n);
+    for (const n of names) add(n);
+    return ordered.length ? ordered : null;
+  } catch {
+    return null;
+  }
+}
+
+async function getModels() {
+  if (resolvedModels && resolvedModels.length) return resolvedModels;
+  const discovered = await discoverModels();
+  resolvedModels = (discovered && discovered.length) ? discovered : PREFERRED_MODELS.slice();
+  return resolvedModels;
+}
+
 async function streamRiko(onText) {
   const contents = history
     .filter((turn) => turn.text)
@@ -977,16 +1017,22 @@ async function streamRiko(onText) {
     generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 220 },
   };
 
+  const models = await getModels();
   let lastError;
-  for (const model of MODELS) {
+  for (const model of models) {
     try {
-      return await streamModel(body, model, onText);
+      const answer = await streamModel(body, model, onText);
+      // remember the working model first next time
+      resolvedModels = [model, ...models.filter((m) => m !== model)];
+      return answer;
     } catch (err) {
       lastError = err;
       if (err.status === 404) continue;
       throw err;
     }
   }
+  // If everything 404'd, clear cache so we rediscover next time
+  if (lastError?.status === 404) resolvedModels = null;
   throw lastError;
 }
 
@@ -1019,7 +1065,8 @@ async function learnFrom(userText, replyText) {
   };
 
   try {
-    const raw = await callGemini(body, MODELS[0]);
+    const models = await getModels();
+    const raw = await callGemini(body, models[0]);
     const facts = JSON.parse(raw);
     if (Array.isArray(facts)) facts.slice(0, 4).forEach((fact) => addMemory(fact, 'auto'));
   } catch (err) {
