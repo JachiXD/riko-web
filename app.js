@@ -74,6 +74,7 @@ try {
 // is ever wired in, set `meter` to a function returning 0..1 loudness and it takes over.
 let meter = null;
 let speaking = false;
+let speechRun = 0; // bumped on every new line, so an interrupted line stops mid-sentence
 let mouth = 0;
 let mouthTarget = 0;
 let wobble = 0;
@@ -149,6 +150,7 @@ function startListening() {
     setStatus('This browser has no speech recognition — type to her instead.');
     return;
   }
+  speechRun++;
   speechSynthesis.cancel();
   speaking = false;
 
@@ -206,7 +208,7 @@ function stopListening() {
 }
 
 micBtn.addEventListener('click', () => {
-  if (state === 'speaking') { speechSynthesis.cancel(); speaking = false; setState('ready'); return; }
+  if (state === 'speaking') { speechRun++; speechSynthesis.cancel(); speaking = false; setState('ready'); return; }
   if (state === 'listening') { stopListening(); return; }
   if (state === 'thinking') return;
   startListening();
@@ -230,31 +232,81 @@ typeForm.addEventListener('submit', (event) => {
 
 /* ───────────────────────────── Her voice ───────────────────────────── */
 
-const VOICE_HINTS = [
-  'google uk english female', 'google us english', 'samantha', 'aria', 'jenny',
-  'zira', 'ava', 'allison', 'karen', 'moira', 'tessa', 'female',
+// Two things decide how human she sounds. First, which voice gets picked: the old robotic
+// ones sort first alphabetically, so we rank by name and put neural/online/premium voices
+// at the top. Second, an English voice reading "senpai" says it wrong — those words are
+// handed to a Japanese voice instead, with the correct kana so the pronunciation is right.
+
+const EN_HINTS = [
+  'natural', 'neural', 'premium', 'enhanced', 'online', // the good ones
+  'google uk english female', 'google us english', 'google uk english',
+  'samantha', 'ava', 'aria', 'jenny', 'sonia', 'libby', 'michelle', 'emma',
+  'allison', 'karen', 'moira', 'tessa', 'serena', 'kate', 'female',
+];
+const JA_HINTS = [
+  'natural', 'neural', 'premium', 'enhanced', 'online',
+  'google 日本語', 'google japanese', 'kyoko', 'nanami', 'haruka', 'ayumi',
+  'o-ren', 'japanese', '女性',
 ];
 
-function pickVoice() {
-  const voices = speechSynthesis.getVoices().filter((v) => v.lang.toLowerCase().startsWith('en'));
-  if (!voices.length) return null;
-  for (const hint of VOICE_HINTS) {
-    const hit = voices.find((v) => v.name.toLowerCase().includes(hint));
-    if (hit) return hit;
-  }
-  return voices.find((v) => v.localService) || voices[0];
+function bestVoice(hints, langPrefix) {
+  const all = speechSynthesis.getVoices();
+  const list = all.filter((v) => v.lang.toLowerCase().startsWith(langPrefix));
+  if (!list.length) return null;
+  const rank = (v) => {
+    const name = v.name.toLowerCase();
+    const i = hints.findIndex((h) => name.includes(h));
+    return i === -1 ? hints.length + (v.localService ? 1 : 0) : i;
+  };
+  return list.slice().sort((a, b) => rank(a) - rank(b))[0];
 }
-if ('speechSynthesis' in window) speechSynthesis.onvoiceschanged = () => pickVoice();
 
-function say(text) {
-  if (!('speechSynthesis' in window)) { setState('ready'); return Promise.resolve(); }
+let voicesWarm = false;
+function warmVoices() { voicesWarm = true; }
+if ('speechSynthesis' in window) {
+  // Some browsers fill the voice list asynchronously; touching it early means the first
+  // line is spoken with the good voice rather than whatever loaded first.
+  speechSynthesis.getVoices();
+  speechSynthesis.onvoiceschanged = warmVoices;
+}
 
+// Romanised Japanese, spoken properly: kana for the Japanese voice, and the same kana
+// mapped back by hand when a machine has no Japanese voice at all.
+const JP_WORDS = {
+  senpai: 'せんぱい', sempai: 'せんぱい', arigatou: 'ありがとう', arigato: 'ありがとう',
+  konnichiwa: 'こんにちは', konbanwa: 'こんばんは', ohayou: 'おはよう', kawaii: 'かわいい',
+  sugoi: 'すごい', baka: 'ばか', hai: 'はい', iie: 'いいえ', sayonara: 'さようなら',
+  onegai: 'おねがい', itadakimasu: 'いただきます', neko: 'ねこ', desu: 'です',
+  chan: 'ちゃん', kun: 'くん', san: 'さん', sama: 'さま', nani: 'なに',
+  suki: 'すき', daisuki: 'だいすき', yatta: 'やった',
+};
+const JP_RE = new RegExp(`\\b(${Object.keys(JP_WORDS).join('|')})\\b`, 'gi');
+const KANA_RE = /[\u3040-\u30ff\u4e00-\u9fff]/;
+
+// Splits a line into pieces, each tagged with the language that should speak it.
+function chunks(text, hasJapaneseVoice) {
+  const out = [];
+  let last = 0;
+  let match;
+  JP_RE.lastIndex = 0;
+  while ((match = JP_RE.exec(text)) !== null) {
+    if (match.index > last) out.push({ text: text.slice(last, match.index), lang: 'en' });
+    const kana = JP_WORDS[match[1].toLowerCase()];
+    out.push(hasJapaneseVoice ? { text: kana, lang: 'ja' } : { text: match[1], lang: 'en' });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) out.push({ text: text.slice(last), lang: 'en' });
+  return out
+    .map((c) => ({ ...c, lang: KANA_RE.test(c.text) ? 'ja' : c.lang }))
+    .filter((c) => c.text.trim());
+}
+
+function speakPart(text, voice) {
   return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(text);
-    const voice = pickVoice();
     if (voice) utterance.voice = voice;
-    utterance.rate = 1.04;
-    utterance.pitch = 1.2;
+    utterance.rate = 0.97;
+    utterance.pitch = 1.06;
     utterance.volume = 1;
 
     let done = false;
@@ -262,8 +314,6 @@ function say(text) {
       if (done) return;
       done = true;
       clearTimeout(guard);
-      speaking = false;
-      setState('ready');
       resolve();
     };
 
@@ -271,14 +321,36 @@ function say(text) {
     utterance.onend = finish;
     utterance.onerror = finish;
 
-    speaking = true;
-    setState('speaking');
-    speechSynthesis.cancel();
     speechSynthesis.speak(utterance);
 
     // Some browsers never fire onend after a cancel; never get stuck speaking.
-    const guard = setTimeout(finish, 4000 + text.length * 130);
+    const guard = setTimeout(finish, 3000 + text.length * 240);
   });
+}
+
+async function say(text) {
+  if (!('speechSynthesis' in window)) { setState('ready'); return; }
+
+  const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
+  const ja = bestVoice(JA_HINTS, 'ja');
+  const parts = chunks(text, !!ja);
+
+  const run = ++speechRun;
+  speaking = true;
+  setState('speaking');
+  speechSynthesis.cancel();
+
+  try {
+    for (const part of parts) {
+      if (run !== speechRun) return; // she was interrupted
+      await speakPart(part.text, part.lang === 'ja' && ja ? ja : en);
+    }
+  } finally {
+    if (run === speechRun) {
+      speaking = false;
+      setState('ready');
+    }
+  }
 }
 
 /* ───────────────────────────── Her brain ───────────────────────────── */
