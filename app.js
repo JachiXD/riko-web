@@ -110,24 +110,33 @@ function animateBody(dt) {
       if (b) b.node.rotation.set(b.base.x + x, b.base.y + y, b.base.z + z);
     };
 
-    const breathe = Math.sin(motionT * 1.15) * 0.014;
-    set('spine', breathe * 0.5, Math.sin(motionT * 0.41) * 0.03, Math.sin(motionT * 0.33) * 0.012);
-    set('chest', breathe, 0, 0);
+    // Breathing and a slow weight shift through the whole torso — this is what stops her
+    // reading as a still image with a moving mouth.
+    const breathe = Math.sin(motionT * 1.05) * 0.022;
+    set('hips', 0, 0, Math.sin(motionT * 0.23) * 0.045);
+    set('spine', breathe * 0.6, Math.sin(motionT * 0.37) * 0.07, Math.sin(motionT * 0.29) * 0.05);
+    set('chest', breathe, Math.sin(motionT * 0.37) * 0.035, 0);
 
-    const nod = mouth * 0.055 + Math.abs(Math.sin(motionT * 1.6)) * 0.02 * talkAmount;
+    const nod = mouth * 0.075 + Math.abs(Math.sin(motionT * 1.5)) * 0.05 * talkAmount;
     set(
       'head',
-      -nod + Math.sin(motionT * 1.25) * 0.018 + Math.sin(motionT * 3.1) * 0.008 * talkAmount,
-      Math.sin(motionT * 0.47) * 0.07 + Math.sin(motionT * 1.9) * 0.025 * talkAmount,
-      Math.sin(motionT * 0.71) * 0.018,
+      -nod + Math.sin(motionT * 1.15) * 0.03 + Math.sin(motionT * 2.9) * 0.012 * talkAmount,
+      Math.sin(motionT * 0.43) * 0.16 + Math.sin(motionT * 1.8) * 0.05 * talkAmount,
+      Math.sin(motionT * 0.62) * 0.04,
     );
-    set('neck', nod * 0.35, Math.sin(motionT * 0.47) * 0.03, 0);
+    set('neck', nod * 0.4, Math.sin(motionT * 0.43) * 0.06, 0);
 
-    const swing = Math.sin(motionT * 2.2) * 0.075 * talkAmount;
-    set('leftUpperArm', swing, 0, Math.sin(motionT * 1.7) * 0.02 * talkAmount);
-    set('rightUpperArm', -swing, 0, -Math.sin(motionT * 1.7) * 0.02 * talkAmount);
-    set('leftLowerArm', 0, 0, Math.abs(swing) * 0.35);
-    set('rightLowerArm', 0, 0, -Math.abs(swing) * 0.35);
+    // Arms rest with a gentle sway, then lift and bend into a gesture while she speaks —
+    // elbows are where a talking pose reads, so the forearms carry most of the movement.
+    const swing = Math.sin(motionT * 1.6) * 0.05 + Math.sin(motionT * 2.9) * 0.06 * talkAmount;
+    const bend = 0.05 + 0.12 * talkAmount + 0.04 * Math.max(0, Math.sin(motionT * 2.3)) * talkAmount;
+    set('leftUpperArm', swing, 0, -0.05 * talkAmount);
+    set('rightUpperArm', -swing, 0, 0.05 * talkAmount);
+    set('leftLowerArm', 0, 0, -bend);
+    set('rightLowerArm', 0, 0, bend);
+
+    // A few millimetres of vertical float, so her whole body reads as breathing.
+    if (vrm) vrm.scene.position.y = Math.sin(motionT * 1.05) * 0.014;
   }
 
   // Blinking: irregular intervals, a fast close and open, not a metronome.
