@@ -402,6 +402,7 @@ typeForm.addEventListener('submit', (event) => {
    so instead of silently dropping to a system voice, and text still works. */
 
 const VOICE_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const KOKORO_URL = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm';
 const VOICE_NAME = 'af_heart'; // softest and warmest of her voices
 const VOICE_SPEED = 0.94; // a little under real time: warmer and less clipped than 1.0
 const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
@@ -630,80 +631,47 @@ function warmVoice() {
   return voiceWarm;
 }
 
-/* ── Her voice lives on its own thread ──
-   Building the speech model on the page's thread froze everything, so it happens in a
-   worker instead: the page stays usable, and if the worker never answers it is killed. */
+/* ── Her voice ──
+   Kokoro runs here rather than in a worker: inside a worker the library resolves to its
+   Node build and dies on fs.readFile, which is what kept her voice from starting. */
 
-function ensureVoiceWorker() {
-  if (voice.worker) return voice.worker;
+let voiceInit = null;
 
-  const worker = new Worker('./voice-worker.js', { type: 'module' });
+async function buildVoice() {
+  // jsDelivr's browser build, not esm.sh: esm.sh hands back a Node build here, which dies
+  // on fs.readFile and is why her voice kept failing to start.
+  const { KokoroTTS } = await import(KOKORO_URL);
 
-  worker.onmessage = (event) => {
-    const msg = event.data || {};
-
-    if (msg.type === 'progress') {
-      voice.progress = msg.ratio;
-    } else if (msg.type === 'ready') {
-      clearTimeout(voice.timer);
-      voice.timer = null;
-      voice.state = 'ready';
-      voice.settle?.resolve();
-      voice.settle = null;
-    } else if (msg.type === 'audio') {
-      const job = voice.pending.get(msg.id);
-      voice.pending.delete(msg.id);
-      job?.resolve(msg);
-    } else if (msg.type === 'error' && msg.stage === 'speak') {
-      const job = voice.pending.get(msg.id);
-      voice.pending.delete(msg.id);
-      job?.reject(new Error(msg.message));
-    } else if (msg.type === 'error') {
-      failVoice(new Error(msg.message));
-    }
-  };
-
-  worker.onerror = (event) => failVoice(new Error(event.message || 'voice worker failed'));
-
-  voice.worker = worker;
-  return worker;
-}
-
-function failVoice(err) {
-  console.warn('[voice] could not start', err);
-  clearTimeout(voice.timer);
-  voice.timer = null;
-  voice.state = 'failed';
-  voice.error = err;
-  try { voice.worker?.terminate(); } catch { /* already gone */ }
-  voice.worker = null;
-  voice.pending.clear();
-  voice.settle?.reject(err);
-  voice.settle = null;
+  // CPU, single request at a time: the GPU path stalled on the machines this was tested
+  // on, and a voice that starts a second later beats a page that hangs.
+  return KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device: 'wasm' });
 }
 
 function ensureModel() {
-  if (voice.state === 'ready') return Promise.resolve();
-  if (voice.modelTask) return voice.modelTask;
+  if (voice.model) return Promise.resolve(voice.model);
+  if (voiceInit) return voiceInit;
 
   setStatus('Preparing her voice…');
-  voice.state = 'loading';
+  pauseRendering(true);
 
-  voice.modelTask = new Promise((resolve, reject) => {
-    voice.settle = { resolve, reject };
-    ensureVoiceWorker().postMessage({ type: 'init' });
-    // A build that never finishes must not hold her answers hostage.
-    voice.timer = setTimeout(() => failVoice(new Error('voice preparation timed out')), 45000);
-  })
+  voiceInit = buildVoice()
+    .then((model) => {
+      voice.model = model;
+      voice.state = 'ready';
+      console.info('[voice] ready');
+      return model;
+    })
     .catch((err) => {
+      console.warn('[voice] unavailable', err);
       noteVoiceFailed();
       throw err;
     })
     .finally(() => {
-      voice.modelTask = null;
+      voiceInit = null;
+      pauseRendering(false);
     });
 
-  return voice.modelTask;
+  return voiceInit;
 }
 
 /* ── Speaking ── */
@@ -713,17 +681,10 @@ function synth(text, speed = VOICE_SPEED) {
   const cached = voice.cache.get(key);
   if (cached) return Promise.resolve(cached);
 
-  const worker = ensureVoiceWorker();
-  const id = voice.nextId++;
-
-  return new Promise((resolve, reject) => {
-    voice.pending.set(id, { resolve, reject });
-    worker.postMessage({ type: 'speak', id, text, speed });
-  }).then(({ samples, rate }) => {
+  return Promise.resolve(voice.model.generate(text, { voice: VOICE_NAME, speed })).then((audio) => {
     const ctx = ensureAudio();
-    const data = samples instanceof Float32Array ? samples : new Float32Array(samples);
-    const buffer = ctx.createBuffer(1, data.length, rate);
-    buffer.copyToChannel(data, 0);
+    const buffer = ctx.createBuffer(1, audio.audio.length, audio.sampling_rate);
+    buffer.copyToChannel(audio.audio, 0);
     if (voice.cache.size > 80) voice.cache.clear();
     voice.cache.set(key, buffer);
     return buffer;
