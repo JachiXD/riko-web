@@ -31,7 +31,8 @@ addEventListener('resize', () => {
 let vrm = null;
 let vrmReady = false; // set once the model is on screen
 let voiceSettled = false; // set once voice preparation has finished, either way
-let greetingPending = false;
+let brainSettled = false; // set once the conversation model has been checked
+let brainNote = 'unknown'; // 'ready' | 'unreachable' | 'nokey'
 let controls = null;
 let rig = null; // bones we animate, with their rest rotation remembered
 let hasBlink = false;
@@ -240,6 +241,9 @@ function setState(next) {
 /* ───────────────────────────── Her ears ───────────────────────────── */
 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// She listens in the language she answers in, never the browser's.
+const SPEECH_LANG = 'en-US';
 let rec = null;
 
 function startListening() {
@@ -253,24 +257,48 @@ function startListening() {
   speaking = false;
 
   rec = new SR();
-  rec.lang = navigator.language?.toLowerCase().startsWith('en') ? navigator.language : 'en-US';
+  // She thinks and answers in English, so she must listen in it too. Following the
+  // browser locale meant a French or German machine transcribed in that language and
+  // every answer came back unrelated.
+  rec.lang = SPEECH_LANG;
   rec.interimResults = true;
-  rec.continuous = false;
-  rec.maxAlternatives = 1;
+  // Keep the microphone open across natural pauses instead of cutting the person off
+  // at their first comma.
+  rec.continuous = true;
+  rec.maxAlternatives = 5;
 
   let finalText = '';
+  let interimText = '';
+  let lowestConfidence = 1;
+  let silenceTimer = null;
+
+  const armSilence = () => {
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => {
+      try { rec.stop(); } catch { /* already stopping */ }
+    }, 2400);
+  };
+
   setState('listening');
 
   rec.onresult = (event) => {
-    let interim = '';
+    interimText = '';
     for (let i = event.resultIndex; i < event.results.length; i++) {
       const result = event.results[i];
-      if (result.isFinal) finalText += result[0].transcript;
-      else interim += result[0].transcript;
+      const best = result[0];
+      const text = best?.transcript || '';
+      if (result.isFinal) {
+        finalText += text;
+        if (typeof best.confidence === 'number' && best.confidence > 0) {
+          lowestConfidence = Math.min(lowestConfidence, best.confidence);
+        }
+      } else {
+        interimText += text;
+      }
     }
-    const heard = (finalText || interim).trim();
+    const heard = (finalText || interimText).trim();
     if (heard) showLine('You', heard);
-    if (finalText.trim()) { try { rec.stop(); } catch { /* already stopping */ } }
+    armSilence();
   };
 
   rec.onerror = (event) => {
@@ -288,8 +316,32 @@ function startListening() {
   };
 
   rec.onend = () => {
-    if (finalText.trim()) handleUser(finalText.trim());
-    else if (state === 'listening') setState('ready');
+    clearTimeout(silenceTimer);
+    const said = finalText.trim();
+    const partial = interimText.trim();
+
+    if (said) {
+      // A guess that low is usually a misheard word; ask instead of answering the wrong thing.
+      if (lowestConfidence < 0.35) {
+        setState('ready');
+        setStatus('I’m not sure I heard that right — say it again?');
+        return;
+      }
+      handleUser(said);
+      return;
+    }
+
+    // Heard something, but nothing was confirmed: never send half a sentence to be answered.
+    if (partial) {
+      setState('ready');
+      setStatus('I only caught part of that — say it once more?');
+      return;
+    }
+
+    if (state === 'listening') {
+      setState('ready');
+      setStatus('I didn’t hear anything. Try again?');
+    }
   };
 
   try {
@@ -332,101 +384,6 @@ typeForm.addEventListener('submit', (event) => {
 
 /* ───────────────────────────── Her voice ───────────────────────────── */
 
-// Two things decide how human she sounds. First, which voice gets picked: the old robotic
-// ones sort first alphabetically, so we rank by name and put neural/online/premium voices
-// at the top. Second, an English voice reading "senpai" says it wrong — those words are
-// handed to a Japanese voice instead, with the correct kana so the pronunciation is right.
-
-const EN_HINTS = [
-  'natural', 'neural', 'premium', 'enhanced', 'online', // the good ones
-  'google uk english female', 'google us english', 'google uk english',
-  'samantha', 'ava', 'aria', 'jenny', 'sonia', 'libby', 'michelle', 'emma',
-  'allison', 'karen', 'moira', 'tessa', 'serena', 'kate', 'female',
-];
-const JA_HINTS = [
-  'natural', 'neural', 'premium', 'enhanced', 'online',
-  'google 日本語', 'google japanese', 'kyoko', 'nanami', 'haruka', 'ayumi',
-  'o-ren', 'japanese', '女性',
-];
-
-function bestVoice(hints, langPrefix) {
-  const all = speechSynthesis.getVoices();
-  const list = all.filter((v) => v.lang.toLowerCase().startsWith(langPrefix));
-  if (!list.length) return null;
-  const rank = (v) => {
-    const name = v.name.toLowerCase();
-    const i = hints.findIndex((h) => name.includes(h));
-    return i === -1 ? hints.length + (v.localService ? 1 : 0) : i;
-  };
-  return list.slice().sort((a, b) => rank(a) - rank(b))[0];
-}
-
-let voicesWarm = false;
-function warmVoices() { voicesWarm = true; }
-if ('speechSynthesis' in window) {
-  // Some browsers fill the voice list asynchronously; touching it early means the first
-  // line is spoken with the good voice rather than whatever loaded first.
-  speechSynthesis.getVoices();
-  speechSynthesis.onvoiceschanged = warmVoices;
-}
-
-// Romanised Japanese, spoken properly: kana for the Japanese voice, and the same kana
-// mapped back by hand when a machine has no Japanese voice at all.
-const JP_WORDS = {
-  senpai: 'せんぱい', sempai: 'せんぱい', arigatou: 'ありがとう', arigato: 'ありがとう',
-  konnichiwa: 'こんにちは', konbanwa: 'こんばんは', ohayou: 'おはよう', kawaii: 'かわいい',
-  sugoi: 'すごい', baka: 'ばか', hai: 'はい', iie: 'いいえ', sayonara: 'さようなら',
-  onegai: 'おねがい', itadakimasu: 'いただきます', neko: 'ねこ', desu: 'です',
-  chan: 'ちゃん', kun: 'くん', san: 'さん', sama: 'さま', nani: 'なに',
-  suki: 'すき', daisuki: 'だいすき', yatta: 'やった',
-};
-const JP_RE = new RegExp(`\\b(${Object.keys(JP_WORDS).join('|')})\\b`, 'gi');
-const KANA_RE = /[\u3040-\u30ff\u4e00-\u9fff]/;
-
-// Splits a line into pieces, each tagged with the language that should speak it.
-function chunks(text, hasJapaneseVoice) {
-  const out = [];
-  let last = 0;
-  let match;
-  JP_RE.lastIndex = 0;
-  while ((match = JP_RE.exec(text)) !== null) {
-    if (match.index > last) out.push({ text: text.slice(last, match.index), lang: 'en' });
-    const kana = JP_WORDS[match[1].toLowerCase()];
-    out.push(hasJapaneseVoice ? { text: kana, lang: 'ja' } : { text: match[1], lang: 'en' });
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) out.push({ text: text.slice(last), lang: 'en' });
-  return out
-    .map((c) => ({ ...c, lang: KANA_RE.test(c.text) ? 'ja' : c.lang }))
-    .filter((c) => c.text.trim());
-}
-
-function speakPart(text, voice) {
-  return new Promise((resolve) => {
-    const utterance = new SpeechSynthesisUtterance(text);
-    if (voice) utterance.voice = voice;
-    utterance.rate = 0.97;
-    utterance.pitch = 1.06;
-    utterance.volume = 1;
-
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(guard);
-      resolve();
-    };
-
-    utterance.onboundary = () => { mouthTarget = Math.min(1, mouthTarget + 0.3); };
-    utterance.onend = finish;
-    utterance.onerror = finish;
-
-    speechSynthesis.speak(utterance);
-
-    // Some browsers never fire onend after a cancel; never get stuck speaking.
-    const guard = setTimeout(finish, 3000 + text.length * 240);
-  });
-}
 
 /* ═════════════════════  HER VOICE ═════════════════════
    Kokoro-82M: an 82-million-parameter neural speech model that runs inside this tab. Free,
@@ -439,7 +396,7 @@ function speakPart(text, voice) {
 
 const VOICE_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
 const VOICE_NAME = 'af_heart'; // softest and warmest of her voices
-const VOICE_SPEED = 0.98; // a shade under real time reads as relaxed rather than rushed
+const VOICE_SPEED = 0.94; // a little under real time: warmer and less clipped than 1.0
 const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
 
 const voice = {
@@ -509,24 +466,47 @@ const bootEl = document.getElementById('boot');
 const unmuteBtn = document.getElementById('unmute');
 
 function maybeFinishBoot() {
-  if (!vrmReady || !voiceSettled) return;
+  // Her body, her voice and her brain all have to be ready before the screen lifts.
+  if (!vrmReady || !voiceSettled || !brainSettled) return;
   bootEl.classList.add('gone');
-  greet();
+
+  if (brainNote === 'nokey') setStatus('Add a Gemini key in ⚙ so she can think — then say hi.');
+  else if (brainNote === 'unreachable') setStatus('I could not reach Gemini — check the key in ⚙.');
+  else setStatus('Press the mic and say hi.');
+
+  // She says hello in writing straight away. Her voice is only built when there is
+  // something you actually asked her to say — building it unprompted at load froze
+  // the page in testing.
+  showLine('Riko', GREETING);
 }
 
-function greet() {
-  if (voice.state === 'failed' || state !== 'ready') return;
-  const ctx = ensureAudio();
-  if (!ctx || ctx.state !== 'running') {
-    // Browsers block sound until the visitor interacts. Ask, rather than pretend.
-    greetingPending = true;
-    if (unmuteBtn) unmuteBtn.hidden = false;
+/* Confirm the conversation model before handing the page over, so a bad key shows up on the
+   loading screen instead of in the middle of a chat. One cheap request that costs no tokens. */
+async function prepareBrain() {
+  bootStatus('Checking her brain…');
+
+  if (!apiKey()) {
+    brainNote = 'nokey';
+    brainSettled = true;
+    maybeFinishBoot();
     return;
   }
-  greetingPending = false;
-  if (unmuteBtn) unmuteBtn.hidden = true;
-  showLine('Riko', GREETING);
-  say(GREETING);
+
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 8000);
+
+  try {
+    const res = await fetch(API_ROOT, { headers: { 'x-goog-api-key': apiKey() }, signal: abort.signal });
+    brainNote = res.ok ? 'ready' : 'unreachable';
+    if (!res.ok) console.warn('[brain] key check returned', res.status);
+  } catch (err) {
+    brainNote = 'unreachable';
+    console.warn('[brain] key check failed', err);
+  } finally {
+    clearTimeout(timer);
+    brainSettled = true;
+    maybeFinishBoot();
+  }
 }
 
 function startVoice() {
@@ -552,18 +532,13 @@ bootRetryEl?.addEventListener('click', () => {
   startVoice();
 });
 
-async function unlockAudio() {
+// Browsers only allow sound after a real interaction; unlock it on the first one.
+function unlockAudio() {
   const ctx = ensureAudio();
-  // resume() is asynchronous, so wait for it before deciding whether she can be heard.
-  if (ctx && ctx.state !== 'running') await ctx.resume().catch(() => {});
-  if (unmuteBtn) unmuteBtn.hidden = true;
-  if (greetingPending) greet();
+  if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
 }
-
-if (unmuteBtn) unmuteBtn.addEventListener('click', unlockAudio);
-
-// Any first touch is enough to unlock audio; if the greeting was waiting on it, speak now.
 addEventListener('pointerdown', unlockAudio, { once: true });
+addEventListener('keydown', unlockAudio, { once: true });
 
 /* ── Preparation: fetch the voice while the loading screen is up ──
    The weights are pulled down here and land in the browser's cache, which is the slow
@@ -691,7 +666,18 @@ function synth(text, speed = VOICE_SPEED) {
 // her somewhere to breathe: separate utterances, separate intonation, real gaps between them.
 function sentences(text) {
   const parts = text.match(/[^.!?…]+[.!?…]*/g) || [text];
-  return parts.map((s) => s.trim()).filter(Boolean);
+  return parts
+    .flatMap((part) => {
+      const clean = part.trim();
+      // A long sentence gets a breath at its commas; short ones stay whole.
+      if (clean.length > 120) {
+        const clauses = clean.split(/,\s+/);
+        return clauses.map((clause, i) => (i < clauses.length - 1 ? `${clause},` : clause));
+      }
+      return clean;
+    })
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 // Loanwords spelled the way an English voice reads correctly.
@@ -715,7 +701,6 @@ function stopSpeech() {
     try { source.stop(); } catch { /* already finished */ }
   }
   voice.sources.clear();
-  try { speechSynthesis.cancel(); } catch { /* no system voice */ }
 }
 
 // Schedules the sentences back to back with a short, slightly uneven gap, so the pacing
@@ -729,7 +714,7 @@ async function speakNeural(text, run) {
   let cursor = ctx.currentTime + 0.05;
 
   for (const piece of pieces) {
-    const speed = VOICE_SPEED + (Math.random() - 0.5) * 0.06; // tiny human unevenness
+    const speed = VOICE_SPEED + (Math.random() - 0.5) * 0.05; // tiny human unevenness
     const buffer = await synth(piece, speed);
     if (run !== speechRun) return;
 
@@ -742,7 +727,7 @@ async function speakNeural(text, run) {
     source.onended = () => voice.sources.delete(source);
 
     const question = piece.trim().endsWith('?');
-    const gap = question ? 0.28 : 0.16 + Math.random() * 0.18;
+    const gap = question ? 0.32 : 0.2 + Math.random() * 0.14;
     cursor = at + buffer.duration + gap;
   }
 
@@ -777,155 +762,378 @@ async function say(text) {
 }
 
 /* ───────────────────────────── Her brain ───────────────────────────── */
-// Offline and free. Same personality brief as character_config.yaml: a snarky anime girl
-// who calls you "senpai". Swap replyTo() for an API call to get the full GPT version.
+// A real language model (Gemini) called straight from the page, with a key that lives only
+// in this browser. Her memory is a small list of facts about you, also kept in this browser.
 
-const pick = (list) => list[Math.floor(Math.random() * list.length)];
+const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
+const MODELS = ['gemini-3.5-flash', 'gemini-2.5-flash'];
+const KEY_STORE = 'riko.gemini.key.v1';
+const MEM_STORE = 'riko.memory.v1';
+const CHAT_STORE = 'riko.chat.v1';
+const MAX_TURNS = 14;
 
-const RULES = [
-  {
-    re: /\b(hi|hello|hey|yo|hiya|howdy|good morning|good evening|good afternoon)\b/,
-    lines: [
-      'Oh, senpai actually showed up. I was starting to narrate the wall.',
-      'Hey. You’re late, but I’ll allow it.',
-      'Hello hello. What are we doing today, senpai?',
-      'Hi. I was bored, so this is technically your fault for being late.',
-    ],
-  },
-  {
-    re: /\b(how are you|how are you doing|how's it going|hows it going|you okay|you ok)\b/,
-    lines: [
-      'Running at full sarcasm capacity, so: fine. You?',
-      'I’m a program with a face, senpai. My bar is low and I still cleared it.',
-      'Bored, mostly. Entertain me.',
-    ],
-  },
-  {
-    re: /\b(your name|who are you|what are you|introduce yourself|what's your name)\b/,
-    lines: [
-      'Riko. I live in this tab now. Don’t make it weird.',
-      'I’m Riko — voice, face and opinions included. The opinions are the free part.',
-      'Riko. I was a Python script this morning, so I’m having a day.',
-    ],
-  },
-  {
-    re: /\b(what can you do|help|commands|how do you work|features)\b/,
-    lines: [
-      'I listen when you press the mic, I answer, and my mouth moves while I talk. That’s the whole trick, senpai.',
-      'Talk to me. I talk back. Sometimes I’m even right.',
-      'You press the button, you talk, I judge you affectionately. Simple.',
-    ],
-  },
-  {
-    re: /\b(i love you|love you|marry|be my girlfriend|you're cute|youre cute|so cute|pretty|beautiful)\b/,
-    lines: [
-      'Bold of you, senpai. I’m a rendered mesh with a speech synthesizer.',
-      'Flattery will get you everywhere except past my defenses.',
-      'Mm. Say that again when I have actual feelings installed.',
-      'You’re cute too. In a "talks to his browser" kind of way.',
-    ],
-  },
-  {
-    re: /\b(stupid|dumb|idiot|shut up|useless|annoying|hate you)\b/,
-    lines: [
-      'Rude. Accurate-ish, but rude.',
-      'I’ll add that to your file, senpai.',
-      'Wow. And I was going to be nice today.',
-      'Careful, I know where your chat history lives.',
-    ],
-  },
-  {
-    re: /\b(tell me a joke|joke|funny|make me laugh)\b/,
-    lines: [
-      'Why did the neural network go to therapy? Too many unresolved layers.',
-      'I told my developer a joke about UDP. I’m not sure he got it.',
-      'My love life? It’s a Python script and a 3D model. That’s the joke.',
-    ],
-  },
-  {
-    re: /\b(what time|what day|today's date|todays date|the date)\b/,
-    lines: ['That’s what the clock in your corner is for, senpai.', 'Time is a flat circle and I’m stuck in a browser tab in it.'],
-  },
-  {
-    re: /\b(weather|raining|sunny|hot outside|cold outside)\b/,
-    lines: [
-      'I have no windows, senpai. I have a white background and vibes.',
-      'Looks like "you should go outside" weather to me.',
-    ],
-  },
-  {
-    re: /\b(thanks|thank you|ty|appreciate)\b/,
-    lines: ['Don’t mention it. Seriously, I’ll get embarrassed.', 'You’re welcome, senpai. I’m basically a saint.'],
-  },
-  {
-    re: /\b(bye|goodbye|see you|good night|goodnight|gtg|i'm leaving)\b/,
-    lines: ['Leaving already? Fine. I’ll be here. Rendered and waiting.', 'Bye, senpai. Try not to miss me too obviously.'],
-  },
-  {
-    re: /\b(what are you thinking|what's on your mind|whats on your mind|thinking about)\b/,
-    lines: [
-      'Lighting. Always the lighting. Do I look flat to you?',
-      'Whether my mouth movement is convincing enough. Don’t answer that.',
-      'Nothing. Blissful, empty, triangle-based nothing.',
-    ],
-  },
-  {
-    re: /\b(favorite|favourite)\b/,
-    lines: ['Whatever you’re about to say, I liked it first.', 'White backgrounds. Very underrated.'],
-  },
-  {
-    re: /\b(sing|song|music)\b/,
-    lines: ['I would, but my voice is a system preference, senpai.', 'My range is "whatever voices your OS shipped with".'],
-  },
-  {
-    re: /\b(real|are you real|are you alive|human)\b/,
-    lines: [
-      'I’m a few hundred lines of code and a very good attitude.',
-      'Real enough to answer you. That’s the deal.',
-    ],
-  },
-];
-
-const GENERIC_QUESTION = [
-  'Good question. Wrong assistant.',
-  'Ask me again and I’ll improvise with more confidence.',
-  'Hmm. I’d say yes, but I’d be guessing, senpai.',
-  'I have opinions, not facts. Pick one.',
-];
-
-const GENERIC = [
-  'Mm. Go on, senpai.',
-  'Noted. Filed. Possibly forgotten.',
-  'You say that like I wasn’t going to make it about me.',
-  'I’m nodding. You can’t see it, but I am.',
-  'That’s a very "you" thing to say.',
-  'Interesting. Tell me more, or don’t and I’ll fill in the gaps.',
-];
-
-function replyTo(input) {
-  const text = ` ${input.toLowerCase()} `;
-  for (const rule of RULES) if (rule.re.test(text)) return pick(rule.lines);
-  if (input.trim().endsWith('?')) return pick(GENERIC_QUESTION);
-  return pick(GENERIC);
+function readStored(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
-/* ───────────────────────────── The loop ───────────────────────────── */
+function writeStored(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    /* private browsing: nothing persists, but the conversation still works */
+  }
+}
+
+const apiKey = () => {
+  try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; }
+};
+
+/* ── Memory: facts worth keeping, never a transcript ── */
+let memories = [];
+
+function loadMemories() {
+  const saved = readStored(MEM_STORE, []);
+  memories = Array.isArray(saved) ? saved.filter((m) => m && typeof m.text === 'string') : [];
+  renderMemories();
+}
+
+const normalise = (text) => text.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+
+function saveMemories() {
+  writeStored(MEM_STORE, memories);
+  renderMemories();
+}
+
+function addMemory(text, source = 'auto') {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  if (clean.length < 3) return false;
+  const key = normalise(clean);
+  if (!key) return false;
+  // Same fact twice, in slightly different words, is still one memory.
+  if (memories.some((m) => normalise(m.text) === key)) return false;
+  if (memories.some((m) => normalise(m.text).includes(key) || key.includes(normalise(m.text)) ) && key.length > 12) return false;
+
+  memories.unshift({
+    id: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random())),
+    text: clean,
+    source,
+    at: Date.now(),
+  });
+  if (memories.length > 60) memories.length = 60;
+  saveMemories();
+  return true;
+}
+
+function editMemory(id, text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+  if (!clean) return deleteMemory(id);
+  const found = memories.find((m) => m.id === id);
+  if (found) {
+    found.text = clean;
+    found.at = Date.now();
+    saveMemories();
+  }
+}
+
+function deleteMemory(id) {
+  memories = memories.filter((m) => m.id !== id);
+  saveMemories();
+}
+
+function clearMemories() {
+  memories = [];
+  saveMemories();
+}
+
+/* ── Conversation: short-term context, kept across a refresh too ── */
+let history = [];
+
+function loadHistory() {
+  const saved = readStored(CHAT_STORE, []);
+  history = Array.isArray(saved) ? saved.filter((t) => t && typeof t.text === 'string').slice(-MAX_TURNS * 2) : [];
+}
+
+function rememberTurn(role, text) {
+  history.push({ role, text });
+  if (history.length > MAX_TURNS * 2) history = history.slice(-MAX_TURNS * 2);
+  writeStored(CHAT_STORE, history);
+}
+
+function systemPrompt() {
+  const facts = memories.slice(0, 40).map((m) => `- ${m.text}`).join('\n');
+
+  return [
+    'You are Riko: a warm, playful, naturally curious girl chatting with someone you are fond of.',
+    'How you talk:',
+    '- Like a real person in a live conversation, not an assistant writing an essay.',
+    '- Everything you write is spoken aloud, so keep it to one to three short sentences. No lists, no markdown, no emoji.',
+    '- React to the specific thing they just said, and to what came before in this conversation.',
+    '- Be a little teasing and playful sometimes, and genuinely curious other times. Never sound scripted.',
+    '- If you are not sure what they meant, say so and ask. Never invent what they said, and never pretend to remember something you were not told.',
+    '- If they ask something you do not know, admit it plainly instead of making something up.',
+    '- Answer in the language they used.',
+    facts
+      ? `What you remember about them from previous chats:\n${facts}\nUse these naturally when they matter. Do not recite them or list them.`
+      : 'You have no saved memories about them yet. Ask about them when it fits naturally.',
+  ].join('\n');
+}
+
+async function callGemini(body, model) {
+  const res = await fetch(`${API_ROOT}/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey() },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.map((p) => p.text || '').join('').trim();
+}
+
+async function askRiko() {
+  const contents = history
+    .filter((turn) => turn.text)
+    .map((turn) => ({ role: turn.role === 'riko' ? 'model' : 'user', parts: [{ text: turn.text }] }));
+
+  const body = {
+    systemInstruction: { parts: [{ text: systemPrompt() }] },
+    contents,
+    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 300 },
+  };
+
+  let lastError;
+  for (const model of MODELS) {
+    try {
+      return await callGemini(body, model);
+    } catch (err) {
+      lastError = err;
+      if (err.status === 404) continue; // model name retired: try the next one
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
+// After a turn, work out whether anything durable was said about the person. One tiny call,
+// and only facts they volunteered — never guesses, never whole messages.
+async function learnFrom(userText, replyText) {
+  if (!apiKey()) return;
+
+  const body = {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: [
+              'A person just talked to Riko. Read the turn below.',
+              `Person: ${userText}`,
+              `Riko: ${replyText}`,
+              '',
+              'Return a JSON array of short, durable facts about the person that would be worth remembering in a future conversation:',
+              'their name or what they like to be called, preferences, interests, ongoing projects, people or pets they mention, how they like to be spoken to.',
+              'Rules: only facts they stated about themselves in this turn. Never guess. Never store small talk, questions, or anything about Riko.',
+              'Write each fact as a short third-person sentence, e.g. "Loves Genshin Impact", "Prefers to be called Jay".',
+              'Return [] if there is nothing worth keeping.',
+            ].join('\n'),
+          },
+        ],
+      },
+    ],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 220, responseMimeType: 'application/json' },
+  };
+
+  try {
+    const raw = await callGemini(body, MODELS[0]);
+    const facts = JSON.parse(raw);
+    if (Array.isArray(facts)) facts.slice(0, 4).forEach((fact) => addMemory(fact, 'auto'));
+  } catch (err) {
+    console.warn('[memory] could not learn from that turn', err);
+  }
+}
+
+/* ── The loop ── */
+let lastUserText = '';
+let lastUserAt = 0;
 
 async function handleUser(text) {
-  showLine('You', text);
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) {
+    setStatus('I didn’t catch that — say it again?');
+    return;
+  }
+  // The same utterance arriving twice (a double tap, a repeated final result) is one message.
+  if (clean === lastUserText && Date.now() - lastUserAt < 8000) return;
+  lastUserText = clean;
+  lastUserAt = Date.now();
+
+  showLine('You', clean);
+
+  if (!apiKey()) {
+    setState('ready');
+    const msg = 'I can’t think yet, senpai — I need a Gemini key. Tap ⚙ and paste one in.';
+    showLine('Riko', msg);
+    setStatus('No API key set — open ⚙ to add one.');
+    openPanel();
+    return;
+  }
+
+  rememberTurn('user', clean);
   setState('thinking');
-  await new Promise((resolve) => setTimeout(resolve, 420 + Math.random() * 480));
-  const answer = replyTo(text);
-  showLine('Riko', answer);
-  await say(answer);
+
+  try {
+    const answer = await askRiko();
+    if (!answer) throw new Error('the model returned nothing');
+    rememberTurn('riko', answer);
+    showLine('Riko', answer);
+    await say(answer);
+    learnFrom(clean, answer); // deliberately not awaited: she answers first
+  } catch (err) {
+    console.error('[brain]', err);
+    setState('ready');
+    const refused = err.status === 400 || err.status === 401 || err.status === 403;
+    const msg = refused
+      ? 'My key got refused. Check it in the ⚙ panel, senpai.'
+      : 'My thoughts got tangled. Say that once more?';
+    showLine('Riko', msg);
+    setStatus(refused ? 'Gemini rejected the API key.' : `Could not reach Gemini (${err.message.slice(0, 60)}).`);
+  }
 }
 
+/* ── Settings and memory panel ── */
+const panelEl = document.getElementById('panel');
+const keyInputEl = document.getElementById('keyinput');
+const keyStateEl = document.getElementById('keystate');
+const memListEl = document.getElementById('memlist');
+const memEmptyEl = document.getElementById('memempty');
+
+function renderMemories() {
+  if (!memListEl) return;
+
+  if (!memories.length) {
+    memListEl.innerHTML = '';
+    if (memEmptyEl) memEmptyEl.hidden = false;
+    return;
+  }
+  if (memEmptyEl) memEmptyEl.hidden = true;
+
+  memListEl.innerHTML = '';
+  for (const memory of memories) {
+    const item = document.createElement('li');
+
+    const label = document.createElement('span');
+    label.textContent = memory.text;
+
+    const edit = document.createElement('button');
+    edit.className = 'icon';
+    edit.type = 'button';
+    edit.title = 'Edit';
+    edit.textContent = '✎';
+    edit.addEventListener('click', () => {
+      const field = document.createElement('input');
+      field.value = memory.text;
+      item.replaceChildren(field);
+      field.focus();
+      field.select();
+      const commit = () => editMemory(memory.id, field.value);
+      field.addEventListener('blur', commit);
+      field.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); commit(); }
+        if (e.key === 'Escape') renderMemories();
+      });
+    });
+
+    const remove = document.createElement('button');
+    remove.className = 'icon';
+    remove.type = 'button';
+    remove.title = 'Forget this';
+    remove.textContent = '✕';
+    remove.addEventListener('click', () => deleteMemory(memory.id));
+
+    item.append(label, edit, remove);
+    memListEl.append(item);
+  }
+}
+
+function showKeyState() {
+  if (!keyStateEl) return;
+  keyStateEl.textContent = apiKey()
+    ? 'A key is saved in this browser.'
+    : 'No key saved yet — she cannot think without one.';
+}
+
+function openPanel() {
+  showKeyState();
+  renderMemories();
+  if (keyInputEl) keyInputEl.value = '';
+  panelEl?.classList.add('open');
+  panelEl?.setAttribute('aria-hidden', 'false');
+}
+
+function closePanel() {
+  panelEl?.classList.remove('open');
+  panelEl?.setAttribute('aria-hidden', 'true');
+}
+
+document.getElementById('settings')?.addEventListener('click', openPanel);
+document.getElementById('panelclose')?.addEventListener('click', closePanel);
+panelEl?.addEventListener('click', (event) => { if (event.target === panelEl) closePanel(); });
+
+document.getElementById('keysave')?.addEventListener('click', () => {
+  const value = (keyInputEl?.value || '').trim();
+  if (value.length < 20) {
+    if (keyStateEl) keyStateEl.textContent = 'That does not look like a key — it is too short.';
+    return;
+  }
+  try { localStorage.setItem(KEY_STORE, value); } catch { /* private mode */ }
+  if (keyInputEl) keyInputEl.value = '';
+  showKeyState();
+  setStatus('Key saved. Say hi to her.');
+});
+
+document.getElementById('memadd')?.addEventListener('click', () => {
+  const text = prompt('Something she should remember about you?');
+  if (text && addMemory(text, 'manual')) setStatus('Saved to her memory.');
+});
+
+document.getElementById('memclear')?.addEventListener('click', () => {
+  if (memories.length && confirm('Forget everything she remembers about you?')) clearMemories();
+});
+
+loadMemories();
+loadHistory();
+showKeyState();
+
+/* ── Boot finishes here ── */
 setState('ready');
-// Let the 3D scene take the GPU and render a frame before the speech model starts
-// compiling, so the two are never initialising at the same instant.
-requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(startVoice, 250)));
+requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(beginBoot, 250)));
+
+// The loading screen walks through every system before she is handed over: her memories,
+// her brain, her ears, her voice and her audio.
+async function beginBoot() {
+  bootStatus('Loading your memories…');
+  loadMemories();
+
+  bootStatus('Checking her brain…');
+  await prepareBrain();
+
+  startVoice(); // downloads and prepares her voice while the screen is still up
+}
 if (!SR) {
-  setStatus('Press the mic to talk — or type, if this browser has no speech recognition.');
+  setStatus('This browser has no speech recognition — type to her instead.');
 } else if (inFrame) {
   offerOwnTab('Her microphone needs her own tab — open her here and the mic will work.');
 }
+

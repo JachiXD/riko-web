@@ -109,6 +109,59 @@
       position: fixed; left: 12px; top: 10px; z-index: 3; pointer-events: none;
       font-size: 11px; color: #a8a8b4; letter-spacing: .01em;
     }
+    #settings {
+      background: #f1f1f5; color: #444; padding: 13px 16px; font-size: 16px;
+    }
+    #settings:hover { background: #e9e9f0; }
+
+    #panel {
+      position: fixed; inset: 0; z-index: 6; display: none; place-items: center;
+      background: rgba(20, 20, 28, .42); backdrop-filter: blur(6px); padding: 18px;
+    }
+    #panel.open { display: grid; }
+    .card {
+      background: #fff; border-radius: 20px; width: min(520px, 100%);
+      max-height: min(80vh, 640px); display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
+    }
+    .card header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 18px 8px;
+    }
+    .card h2 { margin: 0; font-size: 16px; }
+    .card h3 {
+      margin: 16px 0 8px; font-size: 11.5px; letter-spacing: .09em;
+      text-transform: uppercase; color: #8b8b97; font-weight: 600;
+    }
+    .card .body { overflow: auto; padding: 0 18px 18px; }
+    .icon {
+      background: transparent; color: #8b8b97; padding: 4px 8px; font-size: 15px;
+    }
+    .icon:hover { color: #444; }
+    #keyrow { display: flex; gap: 8px; }
+    #keyinput {
+      flex: 1; font: inherit; font-size: 14px; padding: 10px 12px;
+      border-radius: 10px; border: 1px solid #dcdce4; outline: none;
+    }
+    #keyinput:focus { border-color: #b9b9c8; }
+    .hint { font-size: 12px; color: #8b8b97; margin: 8px 0 0; line-height: 1.5; }
+    .hint a { color: #e0356f; }
+    .btn { background: #1b1b22; color: #fff; padding: 10px 16px; font-size: 13.5px; }
+    .btn.ghost { background: #f1f1f5; color: #444; }
+    .btn.danger { background: #fff; color: #c02b5a; border: 1px solid #f0d3de; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    #memlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    #memlist li {
+      display: flex; align-items: flex-start; gap: 6px; background: #f7f7fa;
+      border-radius: 12px; padding: 9px 10px; font-size: 14px; line-height: 1.45;
+    }
+    #memlist li span { flex: 1; }
+    #memlist input {
+      flex: 1; font: inherit; font-size: 14px; padding: 6px 8px;
+      border-radius: 8px; border: 1px solid #dcdce4; outline: none;
+    }
+    #memempty { font-size: 13.5px; color: #8b8b97; margin: 0; }
+
     @media (max-width: 480px) { #mic { font-size: 15px; padding: 12px 18px; min-width: 0; } }
   </style>
   <script type="importmap">
@@ -130,6 +183,7 @@
     <div id="bar">
       <button id="mic" type="button">🎙 Tap to talk</button>
       <button id="kb" type="button" title="Type instead">⌨</button>
+      <button id="settings" type="button" title="Her brain and memory">⚙</button>
       <button id="unmute" type="button" hidden>🔊 Tap to hear her</button>
       <a id="newtab" href="./" target="_blank" rel="noopener noreferrer" hidden>↗ Open in a new tab</a>
     </div>
@@ -149,9 +203,40 @@
     </div>
   </div>
 
+  <div id="panel" aria-hidden="true">
+    <div class="card" role="dialog" aria-modal="true" aria-label="Her brain and memory">
+      <header>
+        <h2>Her brain &amp; memory</h2>
+        <button id="panelclose" class="icon" type="button" title="Close">✕</button>
+      </header>
+      <div class="body">
+        <h3>Gemini API key</h3>
+        <div id="keyrow">
+          <input id="keyinput" type="password" placeholder="Paste your Gemini API key"
+                 autocomplete="off" spellcheck="false">
+          <button id="keysave" class="btn" type="button">Save</button>
+        </div>
+        <p class="hint">
+          Kept in this browser only and never sent anywhere except Google.
+          Get a free one at
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
+        </p>
+        <p class="hint" id="keystate"></p>
+
+        <h3>What she remembers</h3>
+        <ul id="memlist"></ul>
+        <p id="memempty">Nothing yet. She learns things you tell her about yourself as you talk.</p>
+        <div class="row">
+          <button id="memadd" class="btn ghost" type="button">Add a memory</button>
+          <button id="memclear" class="btn danger" type="button">Clear all</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="credit">Model “Kirika-Chan Neko Maid” by Mia MMD</div>
 
   <!-- versioned so a browser can never keep serving an older build of her voice -->
-  <script type="module" src="./app.js?v=3"></script>
+  <script type="module" src="./app.js?v=5"></script>
 </body>
 </html>
