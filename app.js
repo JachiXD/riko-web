@@ -29,6 +29,9 @@ addEventListener('resize', () => {
 });
 
 let vrm = null;
+let vrmReady = false; // set once the model is on screen
+let voiceSettled = false; // set once voice preparation has finished, either way
+let greetingPending = false;
 let controls = null;
 let rig = null; // bones we animate, with their rest rotation remembered
 let hasBlink = false;
@@ -62,7 +65,8 @@ try {
   controls.maxDistance = height * 3.2;
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  document.getElementById('boot').classList.add('gone');
+  vrmReady = true;
+  maybeFinishBoot();
 
   // Capture the rest pose so the idle and talking motion can add to it rather than
   // fight the arm pose set above.
@@ -153,7 +157,7 @@ function animateBody(dt) {
 }
 
 const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => {
+function frame() {
   const dt = Math.min(clock.getDelta(), 0.05);
   wobble += dt * 12.5;
 
@@ -171,7 +175,14 @@ renderer.setAnimationLoop(() => {
   }
   controls?.update();
   renderer.render(scene, camera);
-});
+}
+renderer.setAnimationLoop(frame);
+
+// Preparing the speech model is CPU-heavy. On a weak machine that starves the render loop
+// and the two lock each other up, so rendering is parked while the voice gets ready.
+function pauseRendering(paused) {
+  renderer.setAnimationLoop(paused ? null : frame);
+}
 
 /* ───────────────────────────── The page ───────────────────────────── */
 
@@ -238,8 +249,7 @@ function startListening() {
     return;
   }
   speechRun++;
-  speechSynthesis.cancel();
-  stopAudio();
+  stopSpeech();
   speaking = false;
 
   rec = new SR();
@@ -297,7 +307,7 @@ function stopListening() {
 
 micBtn.addEventListener('click', () => {
   ensureAudio(); // unlock sound inside the click, or phones block it later
-  if (state === 'speaking') { speechRun++; speechSynthesis.cancel(); stopAudio(); speaking = false; setState('ready'); return; }
+  if (state === 'speaking') { speechRun++; stopSpeech(); speaking = false; setState('ready'); return; }
   if (state === 'listening') { stopListening(); return; }
   if (state === 'thinking') return;
   startListening();
@@ -418,140 +428,357 @@ function speakPart(text, voice) {
   });
 }
 
-/* ── A real voice, not a system voice ──
-   Browser voices all sound like a satnav. Kokoro is an 82M-parameter neural TTS model that
-   runs inside this tab: free, no account, no key, nothing sent anywhere. It downloads once
-   (about 88 MB) and is cached, so later visits start instantly. If it cannot run on a given
-   device we fall back to the system voice rather than leaving her silent. */
+/* ═════════════════════  HER VOICE ═════════════════════
+   Kokoro-82M: an 82-million-parameter neural speech model that runs inside this tab. Free,
+   no account, no key, nothing leaves the device. The model is fetched once (about 88 MB),
+   stored by the browser's Cache API, and reused on later visits.
 
-const TTS_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-const TTS_VOICE = 'af_heart'; // warmest of the built-in female voices
+   The whole engine is prepared during the loading screen — model, audio output, and a
+   pre-rendered greeting — so her first word costs nothing. If preparation fails she says
+   so instead of silently dropping to a system voice, and text still works. */
 
-let tts = null;
-let ttsTask = null;
-let ttsBroken = false;
+const VOICE_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const VOICE_NAME = 'af_heart'; // softest and warmest of her voices
+const VOICE_SPEED = 0.98; // a shade under real time reads as relaxed rather than rushed
+const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
+
+const voice = {
+  model: null,
+  state: 'idle', // idle → preparing → prepared → ready | failed
+  task: null,
+  modelTask: null,
+  error: null,
+  cache: new Map(), // synthesised lines, so a repeated line is instant
+  sources: new Set(),
+};
+
 let audioCtx = null;
 let analyser = null;
 let levelData = null;
-let playingNode = null;
 
 function ensureAudio() {
   if (!audioCtx) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
     audioCtx = new Ctx();
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     levelData = new Uint8Array(analyser.fftSize);
     analyser.connect(audioCtx.destination);
   }
-  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   return audioCtx;
 }
 
-function loadVoiceModel() {
-  if (tts) return Promise.resolve(tts);
-  if (ttsBroken) return Promise.resolve(null);
-  if (!ttsTask) {
-    ttsTask = (async () => {
-      const { KokoroTTS } = await import('kokoro-js');
-      const onProgress = (p) => {
-        if (p?.status === 'progress' && p.total) {
-          setStatus(`Giving her a real voice… ${Math.round((p.loaded / p.total) * 100)}% (one time only)`);
-        }
-      };
-      // 8-bit weights keep the one-time download near 88 MB instead of 310 MB, and the
-      // quality difference is not audible on speech this short. The GPU path is faster
-      // where it works; WASM is the fallback that always works.
-      try {
-        tts = await KokoroTTS.from_pretrained(TTS_MODEL, {
-          dtype: 'q8',
-          device: navigator.gpu ? 'webgpu' : 'wasm',
-          progress_callback: onProgress,
-        });
-      } catch (err) {
-        console.warn('GPU voice path unavailable, using CPU.', err);
-        tts = await KokoroTTS.from_pretrained(TTS_MODEL, { dtype: 'q8', device: 'wasm', progress_callback: onProgress });
-      }
-      return tts;
-    })().catch((err) => {
-      console.warn('Neural voice unavailable; using the system voice.', err);
-      ttsBroken = true;
-      return null;
-    });
-  }
-  return ttsTask;
+// Her mouth follows the real loudness of her own audio.
+function startMeter() {
+  if (!analyser) return;
+  meter = () => {
+    analyser.getByteTimeDomainData(levelData);
+    let sum = 0;
+    for (let i = 0; i < levelData.length; i++) {
+      const x = (levelData[i] - 128) / 128;
+      sum += x * x;
+    }
+    return Math.min(1, Math.sqrt(sum / levelData.length) * 5);
+  };
 }
 
-function playSamples(samples, rate) {
-  return new Promise((resolve) => {
+/* ── Loading screen hooks ── */
+const bootMsgEl = document.getElementById('bootmsg');
+const bootBarEl = document.getElementById('bootbar');
+const bootFillEl = document.getElementById('bootfill');
+const bootRetryEl = document.getElementById('bootretry');
+
+function bootStatus(text) {
+  if (bootMsgEl) bootMsgEl.textContent = text;
+}
+function bootProgress(ratio) {
+  if (!bootBarEl) return;
+  bootBarEl.hidden = false;
+  bootFillEl.style.width = `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+}
+function bootClearProgress() {
+  if (!bootBarEl) return;
+  bootBarEl.hidden = true;
+  bootFillEl.style.width = '0%';
+}
+
+/* ── Boot sequence: the page does not call itself ready until the voice is ── */
+const bootEl = document.getElementById('boot');
+const unmuteBtn = document.getElementById('unmute');
+
+function maybeFinishBoot() {
+  if (!vrmReady || !voiceSettled) return;
+  bootEl.classList.add('gone');
+  greet();
+}
+
+function greet() {
+  if (voice.state === 'failed' || state !== 'ready') return;
+  const ctx = ensureAudio();
+  if (!ctx || ctx.state !== 'running') {
+    // Browsers block sound until the visitor interacts. Ask, rather than pretend.
+    greetingPending = true;
+    if (unmuteBtn) unmuteBtn.hidden = false;
+    return;
+  }
+  greetingPending = false;
+  if (unmuteBtn) unmuteBtn.hidden = true;
+  showLine('Riko', GREETING);
+  say(GREETING);
+}
+
+function startVoice() {
+  voiceSettled = false;
+  prepareVoice()
+    .then(() => {
+      bootProgress(1);
+      bootStatus('Riko is ready.');
+    })
+    .catch(() => {
+      bootStatus('Her voice could not load — typing still works.');
+      if (bootRetryEl) bootRetryEl.hidden = false;
+    })
+    .finally(() => {
+      voiceSettled = true;
+      maybeFinishBoot();
+    });
+}
+
+bootRetryEl?.addEventListener('click', () => {
+  bootStatus('Trying her voice again…');
+  bootClearProgress();
+  startVoice();
+});
+
+async function unlockAudio() {
+  const ctx = ensureAudio();
+  // resume() is asynchronous, so wait for it before deciding whether she can be heard.
+  if (ctx && ctx.state !== 'running') await ctx.resume().catch(() => {});
+  if (unmuteBtn) unmuteBtn.hidden = true;
+  if (greetingPending) greet();
+}
+
+if (unmuteBtn) unmuteBtn.addEventListener('click', unlockAudio);
+
+// Any first touch is enough to unlock audio; if the greeting was waiting on it, speak now.
+addEventListener('pointerdown', unlockAudio, { once: true });
+
+/* ── Preparation: fetch the voice while the loading screen is up ──
+   The weights are pulled down here and land in the browser's cache, which is the slow
+   part of a first visit. Building the inference session itself happens on her first
+   words: doing that while the 3D scene was still starting froze weaker machines during
+   testing, and a download carries none of that risk. */
+
+const MODEL_BASE = `https://huggingface.co/${VOICE_MODEL}/resolve/main/`;
+const VOICE_FILES = ['onnx/model_quantized.onnx', 'config.json', 'tokenizer.json', 'tokenizer_config.json'];
+
+function prepareVoice() {
+  if (voice.task) return voice.task;
+  if (voice.state === 'prepared' || voice.state === 'ready') return Promise.resolve();
+
+  voice.state = 'preparing';
+  voice.error = null;
+  if (bootRetryEl) bootRetryEl.hidden = true;
+  bootStatus('Preparing voice…');
+  bootProgress(0);
+
+  voice.task = (async () => {
+    bootStatus('Initializing audio…');
+    ensureAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+
+    bootStatus('Loading voice resources…');
+    let finished = 0;
+
+    await Promise.all(
+      VOICE_FILES.map(async (file) => {
+        try {
+          const res = await fetch(MODEL_BASE + file);
+          if (!res.ok) return;
+          const total = Number(res.headers.get('content-length') || 0);
+          if (!res.body || !total) {
+            await res.arrayBuffer();
+          } else {
+            const reader = res.body.getReader();
+            let loaded = 0;
+            for (;;) {
+              const chunk = await reader.read();
+              if (chunk.done) break;
+              loaded += chunk.value?.length || 0;
+              bootProgress((finished + Math.min(1, loaded / total)) / VOICE_FILES.length);
+            }
+          }
+        } catch (err) {
+          console.warn('[voice] could not preload', file, err);
+        } finally {
+          finished += 1;
+          bootProgress(finished / VOICE_FILES.length);
+        }
+      }),
+    );
+
+    voice.state = 'prepared';
+    bootStatus('Voice resources ready');
+  })()
+    .catch((err) => {
+      console.error('[voice] preparation failed', err);
+      voice.state = 'failed';
+      voice.error = err;
+      throw err;
+    })
+    .finally(() => {
+      voice.task = null;
+    });
+
+  return voice.task;
+}
+
+/* ── Build the session, once, on her first words ── */
+function ensureModel() {
+  if (voice.model) return Promise.resolve(voice.model);
+  if (voice.modelTask) return voice.modelTask;
+
+  setStatus('Preparing her voice…');
+  pauseRendering(true);
+
+  voice.modelTask = (async () => {
+    const { KokoroTTS } = await import('kokoro-js');
+    const load = (device) => KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device });
+
+    try {
+      voice.model = await load(navigator.gpu ? 'webgpu' : 'wasm');
+    } catch (err) {
+      console.warn('[voice] GPU path unavailable, using CPU', err);
+      voice.model = await load('wasm');
+    }
+
+    voice.state = 'ready';
+    return voice.model;
+  })()
+    .catch((err) => {
+      console.error('[voice] model failed to load', err);
+      voice.state = 'failed';
+      voice.error = err;
+      throw err;
+    })
+    .finally(() => {
+      voice.modelTask = null;
+      pauseRendering(false);
+    });
+
+  return voice.modelTask;
+}
+
+/* ── Speaking ── */
+function synth(text, speed = VOICE_SPEED) {
+  const key = `${speed.toFixed(2)}|${text}`;
+  const cached = voice.cache.get(key);
+  if (cached) return Promise.resolve(cached);
+
+  return Promise.resolve(voice.model.generate(text, { voice: VOICE_NAME, speed })).then((audio) => {
     const ctx = ensureAudio();
-    const buffer = ctx.createBuffer(1, samples.length, rate);
-    buffer.copyToChannel(samples, 0);
-    const node = ctx.createBufferSource();
-    node.buffer = buffer;
-    node.connect(analyser);
-    // Her mouth now follows the real loudness of the audio, not a guessed wobble.
-    meter = () => {
-      analyser.getByteTimeDomainData(levelData);
-      let sum = 0;
-      for (let i = 0; i < levelData.length; i++) {
-        const x = (levelData[i] - 128) / 128;
-        sum += x * x;
-      }
-      return Math.min(1, Math.sqrt(sum / levelData.length) * 5);
-    };
-    node.onended = () => {
-      meter = null;
-      playingNode = null;
-      resolve();
-    };
-    playingNode = node;
-    node.start();
+    const buffer = ctx.createBuffer(1, audio.audio.length, audio.sampling_rate);
+    buffer.copyToChannel(audio.audio, 0);
+    if (voice.cache.size > 80) voice.cache.clear();
+    voice.cache.set(key, buffer);
+    return buffer;
   });
 }
 
-function stopAudio() {
+// Splits a reply into sentences so each one is synthesised on its own. That is what gives
+// her somewhere to breathe: separate utterances, separate intonation, real gaps between them.
+function sentences(text) {
+  const parts = text.match(/[^.!?…]+[.!?…]*/g) || [text];
+  return parts.map((s) => s.trim()).filter(Boolean);
+}
+
+// Loanwords spelled the way an English voice reads correctly.
+const SPELLING = [
+  [/\bsenpai\b/gi, 'sempai'],
+  [/\barigatou\b/gi, 'ah-ree-gah-toh'],
+  [/\bkonnichiwa\b/gi, 'kon-nee-chee-wah'],
+  [/\bsayonara\b/gi, 'sah-yoh-nah-rah'],
+  [/\bkawaii\b/gi, 'kah-wah-ee'],
+  [/\bonegai\b/gi, 'oh-neh-guy'],
+  [/\bitadakimasu\b/gi, 'ee-tah-dah-kee-mahs'],
+];
+
+function pronounce(text) {
+  return SPELLING.reduce((out, [re, say]) => out.replace(re, say), text);
+}
+
+function stopSpeech() {
   meter = null;
-  if (playingNode) {
-    try { playingNode.stop(); } catch { /* already stopped */ }
-    playingNode = null;
+  for (const source of voice.sources) {
+    try { source.stop(); } catch { /* already finished */ }
   }
+  voice.sources.clear();
+  try { speechSynthesis.cancel(); } catch { /* no system voice */ }
+}
+
+// Schedules the sentences back to back with a short, slightly uneven gap, so the pacing
+// sounds like thought rather than a metronome. The next sentence is synthesised while the
+// current one is already playing.
+async function speakNeural(text, run) {
+  const ctx = ensureAudio();
+  if (!ctx) throw new Error('no audio context');
+
+  const pieces = sentences(pronounce(text));
+  let cursor = ctx.currentTime + 0.05;
+
+  for (const piece of pieces) {
+    const speed = VOICE_SPEED + (Math.random() - 0.5) * 0.06; // tiny human unevenness
+    const buffer = await synth(piece, speed);
+    if (run !== speechRun) return;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(analyser);
+    const at = Math.max(cursor, ctx.currentTime + 0.02);
+    source.start(at);
+    voice.sources.add(source);
+    source.onended = () => voice.sources.delete(source);
+
+    const question = piece.trim().endsWith('?');
+    const gap = question ? 0.28 : 0.16 + Math.random() * 0.18;
+    cursor = at + buffer.duration + gap;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, (cursor - ctx.currentTime) * 1000)));
 }
 
 async function say(text) {
   const run = ++speechRun;
   speaking = true;
   setState('speaking');
-  speechSynthesis.cancel();
-  stopAudio();
-
-  const model = await loadVoiceModel();
-  if (run !== speechRun) return;
-
-  const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
-  const ja = bestVoice(JA_HINTS, 'ja');
-  const parts = chunks(text, !!ja);
+  stopSpeech();
 
   try {
-    for (const part of parts) {
-      if (run !== speechRun) return; // she was interrupted
-      if (part.lang === 'ja' && ja) {
-        await speakPart(part.text, ja); // Japanese words keep their real pronunciation
-      } else if (model) {
-        const audio = await model.generate(part.text, { voice: TTS_VOICE, speed: 1.03 });
+    if (voice.state !== 'failed') {
+      await ensureModel(); // first words pay for building the model, then it is cached
+      if (run !== speechRun) return;
+      startMeter();
+      await speakNeural(text, run);
+    } else {
+      // Fallback only: the neural voice is still preparing, or could not start on this device.
+      const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
+      const ja = bestVoice(JA_HINTS, 'ja');
+      const parts = chunks(text, !!ja);
+      for (const part of parts) {
         if (run !== speechRun) return;
-        await playSamples(audio.audio, audio.sampling_rate);
-      } else {
-        await speakPart(part.text, en);
+        await speakPart(part.text, part.lang === 'ja' && ja ? ja : en);
       }
     }
   } catch (err) {
-    console.warn('Neural voice failed; using the system voice.', err);
-    ttsBroken = true;
+    console.warn('[voice] playback failed, using the system voice', err);
+    const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
     try { await speakPart(text, en); } catch { /* nothing else to try */ }
   } finally {
     if (run === speechRun) {
       speaking = false;
+      meter = null;
       setState('ready');
     }
   }
@@ -702,6 +929,9 @@ async function handleUser(text) {
 }
 
 setState('ready');
+// Let the 3D scene take the GPU and render a frame before the speech model starts
+// compiling, so the two are never initialising at the same instant.
+requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(startVoice, 250)));
 if (!SR) {
   setStatus('Press the mic to talk — or type, if this browser has no speech recognition.');
 } else if (inFrame) {
