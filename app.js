@@ -256,6 +256,9 @@ function startListening() {
   stopSpeech();
   speaking = false;
 
+  // Build her voice while you are still talking, so it is ready when she answers.
+  warmVoice().catch(() => {});
+
   rec = new SR();
   // She thinks and answers in English, so she must listen in it too. Following the
   // browser locale meant a French or German machine transcribed in that language and
@@ -368,7 +371,11 @@ micBtn.addEventListener('click', () => {
 function toggleType(force) {
   const show = force ?? typeForm.hidden;
   typeForm.hidden = !show;
-  if (show) typed.focus();
+  if (show) {
+    typed.focus();
+    // Typing is a heads-up that a reply is coming: warm her voice in the background.
+    warmVoice().catch(() => {});
+  }
 }
 
 kbBtn.addEventListener('click', () => toggleType());
@@ -611,6 +618,18 @@ function prepareVoice() {
 }
 
 /* ── Build the session, once, on her first words ── */
+let voiceWarm = null;
+
+function warmVoice() {
+  if (!voiceWarm) {
+    voiceWarm = ensureModel().catch((err) => {
+      voiceWarm = null;
+      throw err;
+    });
+  }
+  return voiceWarm;
+}
+
 function ensureModel() {
   if (voice.model) return Promise.resolve(voice.model);
   if (voice.modelTask) return voice.modelTask;
@@ -622,10 +641,12 @@ function ensureModel() {
     const { KokoroTTS } = await import('kokoro-js');
     const load = (device) => KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device });
 
+    const tryGpu = !!navigator.gpu && !voice.gpuBroken;
     try {
-      voice.model = await load(navigator.gpu ? 'webgpu' : 'wasm');
+      voice.model = await load(tryGpu ? 'webgpu' : 'wasm');
     } catch (err) {
       console.warn('[voice] GPU path unavailable, using CPU', err);
+      voice.gpuBroken = tryGpu; // remember, so a retry does not stall on it again
       voice.model = await load('wasm');
     }
 
@@ -703,62 +724,81 @@ function stopSpeech() {
   voice.sources.clear();
 }
 
-// Schedules the sentences back to back with a short, slightly uneven gap, so the pacing
-// sounds like thought rather than a metronome. The next sentence is synthesised while the
-// current one is already playing.
-async function speakNeural(text, run) {
+// Speech is fed to her as the model writes it: the first clause is synthesised and starts
+// playing while the rest of the answer is still arriving, instead of waiting for the whole
+// reply and then the whole first sentence.
+function speechBoundary(text, final) {
+  const stop = text.match(/[.!?…](\s|$)/);
+  if (stop) return stop.index + 1;
+  if (text.length > 90) {
+    const clause = text.search(/[,;:]\s/);
+    if (clause > 20) return clause + 1;
+  }
+  return final && text.trim() ? text.length : -1;
+}
+
+let voiceFailureNoted = false;
+function noteVoiceFailed() {
+  if (voiceFailureNoted) return;
+  voiceFailureNoted = true;
+  setStatus('Her voice will not load on this device — she can still answer in text.');
+}
+
+function createSpeaker(run) {
   const ctx = ensureAudio();
-  if (!ctx) throw new Error('no audio context');
+  let pending = '';
+  let chain = Promise.resolve();
+  let clock = 0;
 
-  const pieces = sentences(pronounce(text));
-  let cursor = ctx.currentTime + 0.05;
+  const speakPiece = async (piece) => {
+    if (run !== speechRun || !ctx) return;
 
-  for (const piece of pieces) {
-    const speed = VOICE_SPEED + (Math.random() - 0.5) * 0.05; // tiny human unevenness
-    const buffer = await synth(piece, speed);
+    try {
+      await warmVoice();
+    } catch (err) {
+      console.warn('[voice] unavailable, answering in text only', err);
+      noteVoiceFailed();
+      return;
+    }
+
+    const buffer = await synth(piece);
     if (run !== speechRun) return;
 
     const source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(analyser);
-    const at = Math.max(cursor, ctx.currentTime + 0.02);
+    const at = Math.max(clock, ctx.currentTime + 0.03);
     source.start(at);
     voice.sources.add(source);
     source.onended = () => voice.sources.delete(source);
 
-    const question = piece.trim().endsWith('?');
-    const gap = question ? 0.32 : 0.2 + Math.random() * 0.14;
-    cursor = at + buffer.duration + gap;
-  }
+    clock = at + buffer.duration + (piece.trim().endsWith('?') ? 0.3 : 0.18);
+  };
 
-  await new Promise((resolve) => setTimeout(resolve, Math.max(0, (cursor - ctx.currentTime) * 1000)));
-}
-
-async function say(text) {
-  const run = ++speechRun;
-  speaking = true;
-  setState('speaking');
-  stopSpeech();
-
-  try {
-    await ensureModel(); // built once per visit, from the files the loading screen fetched
-    if (run !== speechRun) return;
-    startMeter();
-    await speakNeural(text, run);
-  } catch (err) {
-    console.warn('[voice] could not speak', err);
-    // No robotic stand-in, ever. If her real voice is unavailable, say so plainly.
-    setStatus('Her voice could not start on this device.');
-    bootEl.classList.remove('gone');
-    bootStatus('Her voice could not start — tap Retry.');
-    if (bootRetryEl) bootRetryEl.hidden = false;
-  } finally {
-    if (run === speechRun) {
-      speaking = false;
-      meter = null;
-      setState('ready');
+  const drain = (final) => {
+    for (;;) {
+      const cut = speechBoundary(pending, final);
+      if (cut < 0) return;
+      const piece = pending.slice(0, cut).trim();
+      pending = pending.slice(cut);
+      if (piece) chain = chain.then(() => speakPiece(piece));
     }
-  }
+  };
+
+  return {
+    push(chunk) {
+      pending += chunk;
+      drain(false);
+    },
+    async finish() {
+      drain(true);
+      await chain;
+      if (ctx) {
+        // Stay "speaking" until the audio clock has actually run out.
+        await new Promise((resolve) => setTimeout(resolve, Math.max(0, (clock - ctx.currentTime) * 1000)));
+      }
+    },
+  };
 }
 
 /* ───────────────────────────── Her brain ───────────────────────────── */
@@ -902,7 +942,58 @@ async function callGemini(body, model) {
   return parts.map((p) => p.text || '').join('').trim();
 }
 
-async function askRiko() {
+async function streamModel(body, model, onText) {
+  const res = await fetch(`${API_ROOT}/${model}:streamGenerateContent?alt=sse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey() },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    const err = new Error(`Gemini ${res.status}: ${detail.slice(0, 160)}`);
+    err.status = res.status;
+    throw err;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let full = '';
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+
+      try {
+        const json = JSON.parse(payload);
+        const parts = json?.candidates?.[0]?.content?.parts || [];
+        const text = parts.map((part) => part.text || '').join('');
+        if (text) {
+          full += text;
+          onText(text);
+        }
+      } catch {
+        /* a keep-alive or a split frame: ignore it */
+      }
+    }
+  }
+
+  return full.trim();
+}
+
+// Her words arrive as they are written, so she can start answering before finishing.
+async function streamRiko(onText) {
   const contents = history
     .filter((turn) => turn.text)
     .map((turn) => ({ role: turn.role === 'riko' ? 'model' : 'user', parts: [{ text: turn.text }] }));
@@ -910,13 +1001,13 @@ async function askRiko() {
   const body = {
     systemInstruction: { parts: [{ text: systemPrompt() }] },
     contents,
-    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 300 },
+    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 160 },
   };
 
   let lastError;
   for (const model of MODELS) {
     try {
-      return await callGemini(body, model);
+      return await streamModel(body, model, onText);
     } catch (err) {
       lastError = err;
       if (err.status === 404) continue; // model name retired: try the next one
@@ -991,15 +1082,30 @@ async function handleUser(text) {
   }
 
   rememberTurn('user', clean);
+
+  const run = ++speechRun;
+  stopSpeech();
+  speaking = true;
   setState('thinking');
+  startMeter();
 
   try {
-    const answer = await askRiko();
+    // Her voice builds in the background; the words do not wait for it.
+    setState('speaking');
+    const speaker = createSpeaker(run);
+    let shown = '';
+
+    const answer = await streamRiko((chunk) => {
+      if (run !== speechRun) return;
+      shown += chunk;
+      showLine('Riko', shown.trim());
+      speaker.push(chunk); // she starts talking at the first finished clause
+    });
+
     if (!answer) throw new Error('the model returned nothing');
+    await speaker.finish();
     rememberTurn('riko', answer);
-    showLine('Riko', answer);
-    await say(answer);
-    learnFrom(clean, answer); // deliberately not awaited: she answers first
+    learnFrom(clean, answer); // deliberately not awaited: she has already answered
   } catch (err) {
     console.error('[brain]', err);
     setState('ready');
@@ -1118,11 +1224,19 @@ showKeyState();
 
 /* ── Boot finishes here ── */
 setState('ready');
+// Start once the first frame has been drawn, or on a timer if frames are paused (a tab in
+// the background never runs requestAnimationFrame and would wait here forever).
 requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(beginBoot, 250)));
+setTimeout(() => beginBoot(), 1200);
 
 // The loading screen walks through every system before she is handed over: her memories,
 // her brain, her ears, her voice and her audio.
+let bootStarted = false;
+
 async function beginBoot() {
+  if (bootStarted) return;
+  bootStarted = true;
+
   bootStatus('Loading your memories…');
   loadMemories();
 
