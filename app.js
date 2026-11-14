@@ -756,25 +756,17 @@ async function say(text) {
   stopSpeech();
 
   try {
-    if (voice.state !== 'failed') {
-      await ensureModel(); // first words pay for building the model, then it is cached
-      if (run !== speechRun) return;
-      startMeter();
-      await speakNeural(text, run);
-    } else {
-      // Fallback only: the neural voice is still preparing, or could not start on this device.
-      const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
-      const ja = bestVoice(JA_HINTS, 'ja');
-      const parts = chunks(text, !!ja);
-      for (const part of parts) {
-        if (run !== speechRun) return;
-        await speakPart(part.text, part.lang === 'ja' && ja ? ja : en);
-      }
-    }
+    await ensureModel(); // built once per visit, from the files the loading screen fetched
+    if (run !== speechRun) return;
+    startMeter();
+    await speakNeural(text, run);
   } catch (err) {
-    console.warn('[voice] playback failed, using the system voice', err);
-    const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
-    try { await speakPart(text, en); } catch { /* nothing else to try */ }
+    console.warn('[voice] could not speak', err);
+    // No robotic stand-in, ever. If her real voice is unavailable, say so plainly.
+    setStatus('Her voice could not start on this device.');
+    bootEl.classList.remove('gone');
+    bootStatus('Her voice could not start — tap Retry.');
+    if (bootRetryEl) bootRetryEl.hidden = false;
   } finally {
     if (run === speechRun) {
       speaking = false;
