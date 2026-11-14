@@ -56,6 +56,12 @@
     #kb {
       background: #f1f1f5; color: #444; padding: 13px 16px; font-size: 16px;
     }
+    #newtab {
+      background: #f1f1f5; color: #444; padding: 13px 18px; font-size: 14px;
+      border-radius: 999px; font-weight: 550; text-decoration: none;
+    }
+    #newtab:hover { background: #e9e9f0; }
+    #newtab[hidden] { display: none; }
     #status { color: #73737f; font-size: 12.5px; text-align: center; }
 
     #typeform { display: flex; gap: 8px; pointer-events: auto; width: min(520px, 94vw); }
@@ -98,6 +104,7 @@
     <div id="bar">
       <button id="mic" type="button">🎙 Tap to talk</button>
       <button id="kb" type="button" title="Type instead">⌨</button>
+      <a id="newtab" href="./" target="_blank" rel="noopener noreferrer" hidden>↗ Open in a new tab</a>
     </div>
     <form id="typeform" hidden>
       <input id="typed" placeholder="Type to Riko…" autocomplete="off">

@@ -169,6 +169,7 @@ renderer.setAnimationLoop(() => {
 const $ = (id) => document.getElementById(id);
 const micBtn = $('mic');
 const kbBtn = $('kb');
+const newTabLink = $('newtab');
 const typeForm = $('typeform');
 const typed = $('typed');
 const statusEl = $('status');
@@ -177,6 +178,17 @@ const whoEl = $('who');
 const textEl = $('text');
 
 const setStatus = (s) => { statusEl.textContent = s; };
+
+// Browsers refuse microphones to a page that is framed inside another page — the prompt
+// never appears, so the button looks broken. Offer the way out instead of a dead end.
+const inFrame = (() => {
+  try { return window.self !== window.top; } catch { return true; }
+})();
+
+function offerOwnTab(message) {
+  if (newTabLink) newTabLink.hidden = false;
+  if (message) setStatus(message);
+}
 
 function showLine(who, text) {
   whoEl.textContent = who;
@@ -245,7 +257,7 @@ function startListening() {
   rec.onerror = (event) => {
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
       setState('ready');
-      setStatus('The microphone is blocked. Allow it in your browser, or type instead.');
+      offerOwnTab('The microphone is blocked here. Give the browser permission, or open her in her own tab.');
       toggleType(true);
     } else if (event.error === 'no-speech') {
       setState('ready');
@@ -683,4 +695,6 @@ async function handleUser(text) {
 setState('ready');
 if (!SR) {
   setStatus('Press the mic to talk — or type, if this browser has no speech recognition.');
+} else if (inFrame) {
+  offerOwnTab('Her microphone needs her own tab — open her here and the mic will work.');
 }
