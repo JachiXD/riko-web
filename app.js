@@ -30,6 +30,8 @@ addEventListener('resize', () => {
 
 let vrm = null;
 let controls = null;
+let rig = null; // bones we animate, with their rest rotation remembered
+let hasBlink = false;
 const loader = new GLTFLoader();
 loader.register((parser) => new VRMLoaderPlugin(parser));
 
@@ -61,6 +63,15 @@ try {
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
   document.getElementById('boot').classList.add('gone');
+
+  // Capture the rest pose so the idle and talking motion can add to it rather than
+  // fight the arm pose set above.
+  rig = {};
+  for (const name of ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm']) {
+    const node = vrm.humanoid.getNormalizedBoneNode(name);
+    if (node) rig[name] = { node, base: node.rotation.clone() };
+  }
+  hasBlink = !!vrm.expressionManager?.getExpression?.('blink');
 } catch (err) {
   console.error(err);
   document.getElementById('boot').innerHTML =
@@ -79,9 +90,62 @@ let mouth = 0;
 let mouthTarget = 0;
 let wobble = 0;
 
+/* ─────────────────── Her body: breathing, sway, talking ─────────────────── */
+// Nothing is animated in the model file itself, so she stands frozen. This adds the small
+// movements a person makes: breathing, weight shifting, head turning, nodding on words,
+// and blinking. Everything scales up when she talks and back down when she stops.
+
+let motionT = 0;
+let talkAmount = 0; // 0 = quiet, 1 = mid-sentence, eased so it never snaps
+let blinkWait = 2.5;
+let blinkPhase = -1;
+
+function animateBody(dt) {
+  motionT += dt;
+  talkAmount += ((speaking ? 1 : 0) - talkAmount) * Math.min(1, dt * 4);
+
+  if (rig) {
+    const set = (name, x, y, z) => {
+      const b = rig[name];
+      if (b) b.node.rotation.set(b.base.x + x, b.base.y + y, b.base.z + z);
+    };
+
+    const breathe = Math.sin(motionT * 1.15) * 0.014;
+    set('spine', breathe * 0.5, Math.sin(motionT * 0.41) * 0.03, Math.sin(motionT * 0.33) * 0.012);
+    set('chest', breathe, 0, 0);
+
+    const nod = mouth * 0.055 + Math.abs(Math.sin(motionT * 1.6)) * 0.02 * talkAmount;
+    set(
+      'head',
+      -nod + Math.sin(motionT * 1.25) * 0.018 + Math.sin(motionT * 3.1) * 0.008 * talkAmount,
+      Math.sin(motionT * 0.47) * 0.07 + Math.sin(motionT * 1.9) * 0.025 * talkAmount,
+      Math.sin(motionT * 0.71) * 0.018,
+    );
+    set('neck', nod * 0.35, Math.sin(motionT * 0.47) * 0.03, 0);
+
+    const swing = Math.sin(motionT * 2.2) * 0.075 * talkAmount;
+    set('leftUpperArm', swing, 0, Math.sin(motionT * 1.7) * 0.02 * talkAmount);
+    set('rightUpperArm', -swing, 0, -Math.sin(motionT * 1.7) * 0.02 * talkAmount);
+    set('leftLowerArm', 0, 0, Math.abs(swing) * 0.35);
+    set('rightLowerArm', 0, 0, -Math.abs(swing) * 0.35);
+  }
+
+  // Blinking: irregular intervals, a fast close and open, not a metronome.
+  if (hasBlink && vrm?.expressionManager) {
+    blinkWait -= dt;
+    if (blinkWait <= 0) { blinkWait = 2 + Math.random() * 4; blinkPhase = 0; }
+    if (blinkPhase >= 0) {
+      blinkPhase += dt / 0.16;
+      const v = blinkPhase >= 1 ? 0 : Math.sin(blinkPhase * Math.PI);
+      vrm.expressionManager.setValue('blink', v);
+      if (blinkPhase >= 1) blinkPhase = -1;
+    }
+  }
+}
+
 const clock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  const dt = clock.getDelta();
+  const dt = Math.min(clock.getDelta(), 0.05);
   wobble += dt * 12.5;
 
   const env = speaking
@@ -89,6 +153,8 @@ renderer.setAnimationLoop(() => {
     : 0;
   mouthTarget += (env - mouthTarget) * 0.42;
   mouth += (mouthTarget - mouth) * 0.34;
+
+  animateBody(dt);
 
   if (vrm?.expressionManager) {
     vrm.expressionManager.setValue('aa', meter ? meter() : mouth);
@@ -152,6 +218,7 @@ function startListening() {
   }
   speechRun++;
   speechSynthesis.cancel();
+  stopAudio();
   speaking = false;
 
   rec = new SR();
@@ -208,7 +275,8 @@ function stopListening() {
 }
 
 micBtn.addEventListener('click', () => {
-  if (state === 'speaking') { speechRun++; speechSynthesis.cancel(); speaking = false; setState('ready'); return; }
+  ensureAudio(); // unlock sound inside the click, or phones block it later
+  if (state === 'speaking') { speechRun++; speechSynthesis.cancel(); stopAudio(); speaking = false; setState('ready'); return; }
   if (state === 'listening') { stopListening(); return; }
   if (state === 'thinking') return;
   startListening();
@@ -223,6 +291,7 @@ function toggleType(force) {
 kbBtn.addEventListener('click', () => toggleType());
 typeForm.addEventListener('submit', (event) => {
   event.preventDefault();
+  ensureAudio();
   const text = typed.value.trim();
   if (!text) return;
   typed.value = '';
@@ -328,23 +397,137 @@ function speakPart(text, voice) {
   });
 }
 
+/* ── A real voice, not a system voice ──
+   Browser voices all sound like a satnav. Kokoro is an 82M-parameter neural TTS model that
+   runs inside this tab: free, no account, no key, nothing sent anywhere. It downloads once
+   (about 88 MB) and is cached, so later visits start instantly. If it cannot run on a given
+   device we fall back to the system voice rather than leaving her silent. */
+
+const TTS_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
+const TTS_VOICE = 'af_heart'; // warmest of the built-in female voices
+
+let tts = null;
+let ttsTask = null;
+let ttsBroken = false;
+let audioCtx = null;
+let analyser = null;
+let levelData = null;
+let playingNode = null;
+
+function ensureAudio() {
+  if (!audioCtx) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new Ctx();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    levelData = new Uint8Array(analyser.fftSize);
+    analyser.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function loadVoiceModel() {
+  if (tts) return Promise.resolve(tts);
+  if (ttsBroken) return Promise.resolve(null);
+  if (!ttsTask) {
+    ttsTask = (async () => {
+      const { KokoroTTS } = await import('kokoro-js');
+      const onProgress = (p) => {
+        if (p?.status === 'progress' && p.total) {
+          setStatus(`Giving her a real voice… ${Math.round((p.loaded / p.total) * 100)}% (one time only)`);
+        }
+      };
+      // 8-bit weights keep the one-time download near 88 MB instead of 310 MB, and the
+      // quality difference is not audible on speech this short. The GPU path is faster
+      // where it works; WASM is the fallback that always works.
+      try {
+        tts = await KokoroTTS.from_pretrained(TTS_MODEL, {
+          dtype: 'q8',
+          device: navigator.gpu ? 'webgpu' : 'wasm',
+          progress_callback: onProgress,
+        });
+      } catch (err) {
+        console.warn('GPU voice path unavailable, using CPU.', err);
+        tts = await KokoroTTS.from_pretrained(TTS_MODEL, { dtype: 'q8', device: 'wasm', progress_callback: onProgress });
+      }
+      return tts;
+    })().catch((err) => {
+      console.warn('Neural voice unavailable; using the system voice.', err);
+      ttsBroken = true;
+      return null;
+    });
+  }
+  return ttsTask;
+}
+
+function playSamples(samples, rate) {
+  return new Promise((resolve) => {
+    const ctx = ensureAudio();
+    const buffer = ctx.createBuffer(1, samples.length, rate);
+    buffer.copyToChannel(samples, 0);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.connect(analyser);
+    // Her mouth now follows the real loudness of the audio, not a guessed wobble.
+    meter = () => {
+      analyser.getByteTimeDomainData(levelData);
+      let sum = 0;
+      for (let i = 0; i < levelData.length; i++) {
+        const x = (levelData[i] - 128) / 128;
+        sum += x * x;
+      }
+      return Math.min(1, Math.sqrt(sum / levelData.length) * 5);
+    };
+    node.onended = () => {
+      meter = null;
+      playingNode = null;
+      resolve();
+    };
+    playingNode = node;
+    node.start();
+  });
+}
+
+function stopAudio() {
+  meter = null;
+  if (playingNode) {
+    try { playingNode.stop(); } catch { /* already stopped */ }
+    playingNode = null;
+  }
+}
+
 async function say(text) {
-  if (!('speechSynthesis' in window)) { setState('ready'); return; }
+  const run = ++speechRun;
+  speaking = true;
+  setState('speaking');
+  speechSynthesis.cancel();
+  stopAudio();
+
+  const model = await loadVoiceModel();
+  if (run !== speechRun) return;
 
   const en = bestVoice(EN_HINTS, 'en') || bestVoice(EN_HINTS, 'ja');
   const ja = bestVoice(JA_HINTS, 'ja');
   const parts = chunks(text, !!ja);
 
-  const run = ++speechRun;
-  speaking = true;
-  setState('speaking');
-  speechSynthesis.cancel();
-
   try {
     for (const part of parts) {
       if (run !== speechRun) return; // she was interrupted
-      await speakPart(part.text, part.lang === 'ja' && ja ? ja : en);
+      if (part.lang === 'ja' && ja) {
+        await speakPart(part.text, ja); // Japanese words keep their real pronunciation
+      } else if (model) {
+        const audio = await model.generate(part.text, { voice: TTS_VOICE, speed: 1.03 });
+        if (run !== speechRun) return;
+        await playSamples(audio.audio, audio.sampling_rate);
+      } else {
+        await speakPart(part.text, en);
+      }
     }
+  } catch (err) {
+    console.warn('Neural voice failed; using the system voice.', err);
+    ttsBroken = true;
+    try { await speakPart(text, en); } catch { /* nothing else to try */ }
   } finally {
     if (run === speechRun) {
       speaking = false;
