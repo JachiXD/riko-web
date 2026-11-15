@@ -183,8 +183,6 @@ export class Avatar {
     this.gazeY = y;
   }
 
-  /* -- state -- */
-
   setState(next) {
     if (!STATES.includes(next) || this.state === next) return;
     this.state = next;
@@ -210,8 +208,10 @@ export class Avatar {
   // The colour of her own words also picks a body mood.
   reactTo(text) {
     const s = String(text || '');
-    if (/(wow|amazing|great news|so excited|yay|!|love it|awesome)/i.test(s)) this.setState('excited');
-    else if (/(not sure|i do not know|confus|what do you mean|hmm)/i.test(s)) this.setState('confused');
+    const excited = /(wow|amazing|great news|so excited|yay|love it|awesome)/i.test(s);
+    const puzzled = /(not sure|i do not know|confus|what do you mean|hmm)/i.test(s);
+    if (excited) this.setState('excited');
+    else if (puzzled) this.setState('confused');
   }
 
   readTextEmotion(text) {
@@ -224,8 +224,6 @@ export class Avatar {
     this.blinkPhase = 0;
     this.blinkWait = 2 + Math.random() * 2;
   }
-
-  /* -- speech -- */
 
   buildPlan(text) {
     return buildVisemePlan(text);
@@ -253,8 +251,6 @@ export class Avatar {
       this.greet();
     }
   }
-
-  /* -- frame -- */
 
   update(dt, level = 0) {
     if (!this.ready) return;
@@ -315,8 +311,6 @@ export class Avatar {
     this.lookAim.set(this.lookOffset.x, y + this.lookOffset.y, 1.1);
     this.lookTarget.position.lerp(this.lookAim, Math.min(1, d * 6));
   }
-
-  /* -- debug surface, used to verify that every joint moves -- */
 
   getMouthShape() {
     return { ...this.mouth, level: this.mouthLevel };
