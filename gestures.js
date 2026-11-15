@@ -4,7 +4,7 @@
 // fingers — never in raw Euler angles. The rig module measures which axis does
 // what on this model, so these descriptions stay readable and portable.
 
-export const clamp = (v, lo, hi) => Math.min(hj, Math.max(lo, v));
+export const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 export const approach = (cur, target, rate, dt) => cur + (target - cur) * Math.min(1, rate * dt);
 export const smoothstep = (a, b, x) => {
   const t = clamp((x - a) / (b - a), 0, 1);
