@@ -85,7 +85,7 @@
     }
     #boot.gone { opacity: 0; pointer-events: none; }
     #boot small { display: block; margin-top: 8px; font-size: 12.5px; color: #a0a0ab; }
-    .bootcard { width: min(340px, 82vw); text-align: center; }
+    .bootcard { width: min(360px, 84vw); text-align: center; }
     #bootmsg {
       margin-top: 18px; font-size: 12.5px; color: #8b8b97; min-height: 18px;
       transition: opacity .3s;
@@ -98,17 +98,14 @@
       display: block; height: 100%; width: 0%; border-radius: 999px;
       background: linear-gradient(90deg, #ff4d8d, #ff8fb4); transition: width .35s ease;
     }
-    #bootretry {
+    #bootretry, #bootskip {
       margin-top: 18px; font: inherit; font-size: 13px; cursor: pointer;
       padding: 10px 18px; border-radius: 999px; border: 1px solid #e2e2ea;
       background: #fff; color: #444;
     }
-    #bootretry:hover { border-color: #c9c9d6; }
-    #bootretry[hidden] { display: none; }
-    #credit {
-      position: fixed; left: 12px; top: 10px; z-index: 3; pointer-events: none;
-      font-size: 11px; color: #a8a8b4; letter-spacing: .01em;
-    }
+    #bootretry:hover, #bootskip:hover { border-color: #c9c9d6; }
+    #bootretry[hidden], #bootskip[hidden] { display: none; }
+    .bootrow { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
     #settings {
       background: #f1f1f5; color: #444; padding: 13px 16px; font-size: 16px;
     }
@@ -121,7 +118,7 @@
     #panel.open { display: grid; }
     .card {
       background: #fff; border-radius: 20px; width: min(520px, 100%);
-      max-height: min(80vh, 640px); display: flex; flex-direction: column; overflow: hidden;
+      max-height: min(84vh, 680px); display: flex; flex-direction: column; overflow: hidden;
       box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
     }
     .card header {
@@ -138,18 +135,25 @@
       background: transparent; color: #8b8b97; padding: 4px 8px; font-size: 15px;
     }
     .icon:hover { color: #444; }
-    #keyrow { display: flex; gap: 8px; }
-    #keyinput {
-      flex: 1; font: inherit; font-size: 14px; padding: 10px 12px;
-      border-radius: 10px; border: 1px solid #dcdce4; outline: none;
-    }
-    #keyinput:focus { border-color: #b9b9c8; }
     .hint { font-size: 12px; color: #8b8b97; margin: 8px 0 0; line-height: 1.5; }
-    .hint a { color: #e0356f; }
     .btn { background: #1b1b22; color: #fff; padding: 10px 16px; font-size: 13.5px; }
     .btn.ghost { background: #f1f1f5; color: #444; }
     .btn.danger { background: #fff; color: #c02b5a; border: 1px solid #f0d3de; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+    select {
+      flex: 1; min-width: 180px; font: inherit; font-size: 13px;
+      padding: 10px 12px; border-radius: 10px; border: 1px solid #dcdce4;
+      background: #fff; color: #444; outline: none;
+    }
+    select:focus { border-color: #b9b9c8; }
+    #brainbar {
+      margin-top: 10px; height: 4px; border-radius: 999px; background: #eeeef4; overflow: hidden;
+    }
+    #brainbar[hidden] { display: none; }
+    #brainfill {
+      display: block; height: 100%; width: 0%; border-radius: 999px;
+      background: linear-gradient(90deg, #ff4d8d, #ff8fb4); transition: width .3s ease;
+    }
     #memlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
     #memlist li {
       display: flex; align-items: flex-start; gap: 6px; background: #f7f7fa;
@@ -169,8 +173,7 @@
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.179.1/build/three.module.js",
         "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.179.1/examples/jsm/",
-        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.4.1/lib/three-vrm.module.min.js",
-        "kokoro-js": "https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm"
+        "@pixiv/three-vrm": "https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@3.4.1/lib/three-vrm.module.min.js"
       }
     }
   </script>
@@ -183,7 +186,7 @@
     <div id="bar">
       <button id="mic" type="button">🎙 Tap to talk</button>
       <button id="kb" type="button" title="Type instead">⌨</button>
-      <button id="settings" type="button" title="Her brain and memory">⚙</button>
+      <button id="settings" type="button" title="Her voice, brain and memory">⚙</button>
       <button id="unmute" type="button" hidden>🔊 Tap to hear her</button>
       <a id="newtab" href="./" target="_blank" rel="noopener noreferrer" hidden>↗ Open in a new tab</a>
     </div>
@@ -196,32 +199,43 @@
 
   <div id="boot">
     <div class="bootcard">
-      <div>Waking Riko up…<small>one moment</small></div>
+      <div>Waking Riko up…<small>her body, voice and brain load locally</small></div>
       <div id="bootmsg">Initializing Riko…</div>
       <div id="bootbar" hidden><i id="bootfill"></i></div>
-      <button id="bootretry" type="button" hidden>Try loading her voice again</button>
+      <div class="bootrow">
+        <button id="bootretry" type="button" hidden>Try her voice again</button>
+        <button id="bootskip" type="button" hidden>Start without waiting</button>
+      </div>
     </div>
   </div>
 
   <div id="panel" aria-hidden="true">
-    <div class="card" role="dialog" aria-modal="true" aria-label="Her brain and memory">
+    <div class="card" role="dialog" aria-modal="true" aria-label="Her voice, brain and memory">
       <header>
-        <h2>Her brain &amp; memory</h2>
+        <h2>Her voice, brain &amp; memory</h2>
         <button id="panelclose" class="icon" type="button" title="Close">✕</button>
       </header>
       <div class="body">
-        <h3>Gemini API key</h3>
-        <div id="keyrow">
-          <input id="keyinput" type="password" placeholder="Paste your Gemini API key"
-                 autocomplete="off" spellcheck="false">
-          <button id="keysave" class="btn" type="button">Save</button>
+        <h3>Her voice</h3>
+        <p class="hint" id="voicestate">Checking her voice…</p>
+        <div class="row">
+          <button id="voice-demo" class="btn ghost" type="button">Hear a sample</button>
+          <button id="voice-retry" class="btn ghost" type="button">Rebuild voice</button>
+        </div>
+
+        <h3>Her brain</h3>
+        <p class="hint" id="brainstate">Checking…</p>
+        <div id="brainbar" hidden><i id="brainfill"></i></div>
+        <div class="row">
+          <select id="modelselect" aria-label="Local model"></select>
+          <button id="loadmodel" class="btn" type="button">Load</button>
         </div>
         <p class="hint">
-          Kept in this browser only and never sent anywhere except Google.
-          Get a free one at
-          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
+          Her language model downloads once into this browser and then runs on your own
+          device: no account, no API key, no per-message cost. It needs WebGPU. Without it,
+          she still answers with a small offline conversational engine.
         </p>
-        <p class="hint" id="keystate"></p>
+        <p class="hint" id="capstate"></p>
 
         <h3>What she remembers</h3>
         <ul id="memlist"></ul>
@@ -234,9 +248,7 @@
     </div>
   </div>
 
-
-
   <!-- versioned so a browser can never keep serving an older build of her voice -->
-  <script type="module" src="./app.js?v=17"></script>
+  <script type="module" src="./app.js?v=27"></script>
 </body>
 </html>
