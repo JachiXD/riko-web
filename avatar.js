@@ -183,7 +183,7 @@ export class Avatar {
     this.gazeY = y;
   }
 
-  /* ── state ── */
+  /* -- state -- */
 
   setState(next) {
     if (!STATES.includes(next) || this.state === next) return;
@@ -211,7 +211,7 @@ export class Avatar {
   reactTo(text) {
     const s = String(text || '');
     if (/(wow|amazing|great news|so excited|yay|!|love it|awesome)/i.test(s)) this.setState('excited');
-    else if (((not sure|i do not know|i don't know|confus|what do you mean|hmm))/i.test(s)) this.setState('confused');
+    else if (/(not sure|i do not know|confus|what do you mean|hmm)/i.test(s)) this.setState('confused');
   }
 
   readTextEmotion(text) {
@@ -225,7 +225,7 @@ export class Avatar {
     this.blinkWait = 2 + Math.random() * 2;
   }
 
-  /* ── speech ── */
+  /* -- speech -- */
 
   buildPlan(text) {
     return buildVisemePlan(text);
@@ -254,7 +254,7 @@ export class Avatar {
     }
   }
 
-  /* ── frame ── */
+  /* -- frame -- */
 
   update(dt, level = 0) {
     if (!this.ready) return;
@@ -316,7 +316,7 @@ export class Avatar {
     this.lookTarget.position.lerp(this.lookAim, Math.min(1, d * 6));
   }
 
-  /* ── debug surface, used to verify that every joint moves ── */
+  /* -- debug surface, used to verify that every joint moves -- */
 
   getMouthShape() {
     return { ...this.mouth, level: this.mouthLevel };
@@ -327,7 +327,7 @@ export class Avatar {
       targets: this.lastTargets || null,
       planLength: this.plan.length,
       progress: this.planProgress,
-      indexSample: this.plan.slice(0, 24).map((p) => p.v || '÷').join(''),
+      indexSample: this.plan.slice(0, 24).map((p) => p.v || '.').join(''),
     };
   }
 
