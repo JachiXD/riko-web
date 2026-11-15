@@ -84,14 +84,55 @@ export class Voice {
   async unlock() {
     const ctx = this.ensureContext();
     if (!ctx) return false;
-    if (ctx.state === 'suspended') {
+    if (ctx.state !== 'running') {
       try {
         await ctx.resume();
       } catch {
         /* the browser refused; playback will report it */
       }
     }
-    return ctx.state === 'running';
+    // Some browsers report the old state for a tick after resume() settles, and
+    // a context that was created before the first gesture needs one retry.
+    if (ctx.state !== 'running') {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      if (ctx.state !== 'running') {
+        try {
+          await ctx.resume();
+        } catch {
+          /* still refused */
+        }
+      }
+    }
+    if (ctx.state === 'running') return true;
+
+    // Last resort: a context created before the first gesture can stay stuck in
+    // suspended (Safari and iOS especially). Build a fresh one inside this
+    // gesture, which is the case those browsers do allow.
+    const fresh = this.#rebuildContext();
+    if (!fresh) return false;
+    if (fresh.state !== 'running') {
+      try {
+        await fresh.resume();
+      } catch {
+        /* the browser refused again */
+      }
+    }
+    return fresh.state === 'running';
+  }
+
+  #rebuildContext() {
+    const old = this.ctx;
+    this.ctx = null;
+    this.master = null;
+    this.analyser = null;
+    this.levelBuf = null;
+    this.sources.clear();
+    try {
+      old?.close?.();
+    } catch {
+      /* already closed */
+    }
+    return this.ensureContext();
   }
 
   get locked() {
@@ -373,6 +414,25 @@ export class Voice {
   /* ── public: speak / stop ── */
 
   async speak(text, token = ++this.token) {
+    try {
+      await this.#speakNow(text, token);
+    } catch (err) {
+      // A blocked or broken voice must never leave the caller waiting: report
+      // it, clear the speaking flag and hand control back.
+      this.speaking = false;
+      this.lastError = err;
+      const blocked = err?.kind === 'blocked' || this.locked;
+      this.onDegraded({
+        kind: blocked ? 'audio-blocked' : 'voice-failed',
+        message: blocked
+          ? 'The browser muted the page until you tap it.'
+          : 'Her voice could not play this line. Her words are on screen.',
+      });
+      this.onIdle();
+    }
+  }
+
+  async #speakNow(text, token = ++this.token) {
     this.token = token;
     this.playedAny = false;
     const parts = splitSpeech(text);
@@ -380,7 +440,7 @@ export class Voice {
 
     if (this.mode === 'none') {
       this.onDegraded({ kind: 'no-voice', message: 'No speech output is available in this browser.' });
-      return;
+      throw new VoiceError('no speech output is available', 'blocked');
     }
 
     if (this.mode === 'device') {
@@ -427,6 +487,7 @@ export class Voice {
         if (token === this.token) this.onIdle();
       } else {
         this.onIdle();
+        throw new VoiceError('no speech output is available', 'blocked');
       }
     }
   }
