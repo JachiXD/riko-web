@@ -1,473 +1,167 @@
-// Riko, in the browser. Free end to end: the browser recognizes speech and speaks for her.
-// The avatar and the mouth movement are the same approach as the original client/index.html.
+// Riko's app loop: ears → brain → voice → body, with states driven by real events.
+//
+// Nothing in here marks her as "speaking" on its own. The voice engine reports
+// playback start, and only then does the UI and the avatar switch to speaking.
 
-import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
-
-/* ───────────────────────── 3D: her body ───────────────────────── */
-
-const host = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
-renderer.setSize(innerWidth, innerHeight);
-host.appendChild(renderer.domElement);
-
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xffffff);
-
-const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 20);
-const light = new THREE.DirectionalLight(0xffffff, Math.PI);
-light.position.set(1, 1, 1);
-scene.add(light);
-
-addEventListener('resize', () => {
-  camera.aspect = innerWidth / innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(innerWidth, innerHeight);
-});
-
-let vrm = null;
-let vrmReady = false; // set once the model is on screen
-let voiceSettled = false; // set once voice preparation has finished, either way
-let brainSettled = false; // set once the conversation model has been checked
-let brainNote = 'unknown'; // 'ready' | 'unreachable' | 'nokey'
-let controls = null;
-let rig = null; // bones we animate, with their rest rotation remembered
-let hasBlink = false;
-const loader = new GLTFLoader();
-loader.register((parser) => new VRMLoaderPlugin(parser));
-
-try {
-  const gltf = await loader.loadAsync('./riko.vrm');
-  vrm = gltf.userData.vrm;
-  VRMUtils.rotateVRM0(vrm); // older VRM 0.x models face away without this
-  scene.add(vrm.scene);
-
-  // Arms down, as in the original. VRM 0.x models are mirrored on this axis.
-  // 1.46 rad ≈ 84° below horizontal: close to the body, but with a little breathing room
-  // so elbows and hands clear the dress instead of passing through it.
-  const arm = vrm.meta?.metaVersion === '0' ? -1.46 : 1.46;
-  vrm.humanoid.getNormalizedBoneNode('leftUpperArm').rotation.z = -arm;
-  vrm.humanoid.getNormalizedBoneNode('rightUpperArm').rotation.z = arm;
-
-  // Frame the camera by her body size, so short and tall models look the same.
-  vrm.scene.updateMatrixWorld(true);
-  const box = new THREE.Box3().setFromObject(vrm.scene);
-  const span = box.max.y - box.min.y;
-  const height = span > 0.3 && span < 20 ? span : 1.6; // guard against odd bounds
-  // Frame the whole model with a little air around her, whatever proportions it has.
-  // The distance is worked out from the camera's own field of view, so a tall or short
-  // model, or a phone-shaped window, still shows all of her instead of cropping her.
-  const frameY = box.min.y + height * 0.70;
-  const vFov = THREE.MathUtils.degToRad(camera.fov);
-  const distance = (height * 0.82) / 2 / Math.tan(vFov / 2);
-  camera.position.set(0, frameY + height * 0.01, distance);
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.target.set(0, frameY, 0);
-  controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-  controls.minDistance = distance * 0.3;
-  controls.maxDistance = distance * 2.6;
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  vrmReady = true;
-  maybeFinishBoot();
-
-  // Capture the rest pose so the idle and talking motion can add to it rather than
-  // fight the arm pose set above.
-  rig = {};
-  for (const name of ['hips', 'spine', 'chest', 'neck', 'head', 'leftUpperArm', 'rightUpperArm', 'leftLowerArm', 'rightLowerArm', 'leftHand', 'rightHand', 'leftShoulder', 'rightShoulder']) {
-    const node = vrm.humanoid.getNormalizedBoneNode(name);
-    if (node) rig[name] = { node, base: node.rotation.clone() };
-  }
-  hasBlink = !!vrm.expressionManager?.getExpression?.('blink');
-} catch (err) {
-  console.error(err);
-  document.getElementById('boot').innerHTML =
-    '<div>Her model did not load.<small>riko.vrm is missing or blocked — check the console.</small></div>';
-}
-
-/* ─────────────────── Lip sync: mouth follows her voice ─────────────────── */
-
-// The original measures the loudness of a playing audio clip. Browser voices do not expose
-// their audio, so we synthesize a matching envelope while she speaks. If a real audio clip
-// is ever wired in, set `meter` to a function returning 0..1 loudness and it takes over.
-let meter = null;
-let speaking = false;
-let speechRun = 0; // bumped on every new line, so an interrupted line stops mid-sentence
-let mouth = 0;
-let mouthTarget = 0;
-let wobble = 0;
-
-/* ─────────────────── Her body: breathing, sway, talking ─────────────────── */
-
-let motionT = 0;
-let talkAmount = 0; // 0 = quiet, 1 = mid-sentence, eased so it never snaps
-let blinkWait = 2.5;
-let blinkPhase = -1;
-
-function animateBody(dt) {
-  motionT += dt;
-  talkAmount += ((speaking ? 1 : 0) - talkAmount) * Math.min(1, dt * 4);
-
-  if (rig) {
-    const set = (name, x, y, z) => {
-      const b = rig[name];
-      if (b) b.node.rotation.set(b.base.x + x, b.base.y + y, b.base.z + z);
-    };
-
-    // Breathing and a slow weight shift through the whole torso.
-    const breathe = Math.sin(motionT * 1.05) * 0.022;
-    set('hips', 0, 0, Math.sin(motionT * 0.23) * 0.045);
-    set('spine', breathe * 0.6, Math.sin(motionT * 0.37) * 0.07, Math.sin(motionT * 0.29) * 0.05);
-    set('chest', breathe, Math.sin(motionT * 0.37) * 0.035, 0);
-
-    const nod = mouth * 0.075 + Math.abs(Math.sin(motionT * 1.5)) * 0.05 * talkAmount;
-    set(
-      'head',
-      -nod + Math.sin(motionT * 1.15) * 0.03 + Math.sin(motionT * 2.9) * 0.012 * talkAmount,
-      Math.sin(motionT * 0.43) * 0.16 + Math.sin(motionT * 1.8) * 0.05 * talkAmount,
-      Math.sin(motionT * 0.62) * 0.04,
-    );
-    set('neck', nod * 0.4, Math.sin(motionT * 0.43) * 0.06, 0);
-
-    // Arms and hands gesture while she speaks, so it’s clear she’s talking.
-    const swing = Math.sin(motionT * 1.6) * 0.06 + Math.sin(motionT * 2.9) * 0.10 * talkAmount;
-    const lift = 0.18 * talkAmount + 0.06 * Math.max(0, Math.sin(motionT * 2.1)) * talkAmount;
-    const bend = 0.06 + 0.22 * talkAmount + 0.08 * Math.max(0, Math.sin(motionT * 2.3)) * talkAmount;
-    const handWave = Math.sin(motionT * 3.4) * 0.18 * talkAmount;
-    const handTilt = Math.sin(motionT * 2.6 + 0.8) * 0.12 * talkAmount;
-
-    set('leftShoulder', 0, 0, 0.03 * talkAmount);
-    set('rightShoulder', 0, 0, -0.03 * talkAmount);
-    set('leftUpperArm', swing - lift * 0.4, 0.05 * talkAmount, -lift);
-    set('rightUpperArm', -swing * 0.8 + lift * 0.25, -0.04 * talkAmount, lift * 0.7);
-    set('leftLowerArm', 0, handTilt * 0.5, -bend);
-    set('rightLowerArm', 0, -handTilt * 0.4, bend * 0.85);
-    set('leftHand', handWave * 0.6, 0, handWave);
-    set('rightHand', -handWave * 0.4, 0, -handTilt);
-
-    if (vrm) vrm.scene.position.y = Math.sin(motionT * 1.05) * 0.014;
-  }
-
-  // Blinking: irregular intervals.
-  if (hasBlink && vrm?.expressionManager) {
-    blinkWait -= dt;
-    if (blinkWait <= 0) { blinkWait = 2 + Math.random() * 4; blinkPhase = 0; }
-    if (blinkPhase >= 0) {
-      blinkPhase += dt / 0.16;
-      const v = blinkPhase >= 1 ? 0 : Math.sin(blinkPhase * Math.PI);
-      vrm.expressionManager.setValue('blink', v);
-      if (blinkPhase >= 1) blinkPhase = -1;
-    }
-  }
-}
-
-const clock = new THREE.Clock();
-function frame() {
-  const dt = Math.min(clock.getDelta(), 0.05);
-  wobble += dt * 12.5;
-
-  const env = speaking
-    ? Math.min(1, 0.32 + 0.62 * Math.abs(Math.sin(wobble)) + 0.14 * Math.sin(wobble * 2.61))
-    : 0;
-  mouthTarget += (env - mouthTarget) * 0.5;
-  mouth += (mouthTarget - mouth) * 0.4;
-
-  animateBody(dt);
-
-  if (vrm?.expressionManager) {
-    const mouthOpen = meter ? meter() : mouth;
-    vrm.expressionManager.setValue('aa', Math.min(1, mouthOpen * 1.15));
-    vrm.update(dt);
-  }
-  controls?.update();
-  renderer.render(scene, camera);
-}
-renderer.setAnimationLoop(frame);
-
-// Preparing the speech model is CPU-heavy. Park rendering while the voice gets ready.
-function pauseRendering(paused) {
-  renderer.setAnimationLoop(paused ? null : frame);
-}
-
-/* ───────────────────────────── The page ───────────────────────────── */
+import { Avatar } from './avatar.js?v=27';
+import { Voice } from './voice.js?v=27';
+import { Ears } from './ears.js?v=27';
+import { Memory } from './memory.js?v=27';
+import { LocalBrain, LOCAL_MODELS, buildMessages, reflexReply, extractFacts } from './brain.js?v=27';
 
 const $ = (id) => document.getElementById(id);
+
+const host = $('scene');
 const micBtn = $('mic');
 const kbBtn = $('kb');
+const settingsBtn = $('settings');
 const newTabLink = $('newtab');
+const unmuteBtn = $('unmute');
 const typeForm = $('typeform');
 const typed = $('typed');
 const statusEl = $('status');
 const lineEl = $('line');
 const whoEl = $('who');
 const textEl = $('text');
+const bootEl = $('boot');
+const bootMsgEl = $('bootmsg');
+const bootBarEl = $('bootbar');
+const bootFillEl = $('bootfill');
+const bootRetryEl = $('bootretry');
+const bootSkipEl = $('bootskip');
+const panelEl = $('panel');
+const memListEl = $('memlist');
+const memEmptyEl = $('memempty');
 
-const setStatus = (s) => { statusEl.textContent = s; };
+const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
 
-// Browsers refuse microphones to a page that is framed inside another page.
-const inFrame = (() => {
-  try { return window.self !== window.top; } catch { return true; }
-})();
+/* ── state ── */
 
-function offerOwnTab(message) {
-  if (newTabLink) newTabLink.hidden = false;
-  if (message) setStatus(message);
+let state = 'idle';
+let runToken = 0;
+let bridge = null;
+let abortController = null;
+let lastUserText = '';
+let lastUserAt = 0;
+let bootDone = false;
+let speakingSince = 0;
+let avatarInfo = null;
+let gpuSupport = null;
+
+const avatar = new Avatar(host);
+const voice = new Voice({
+  onStart: () => {
+    // Real audio started. This is the only place speaking becomes true.
+    if (state !== 'error') setState('speaking');
+    speakingSince = performance.now();
+  },
+  onClause: (text, duration) => avatar.beginClause(text, duration),
+  onIdle: () => {},
+  onStatus: (text) => {
+    if (!bootDone) bootStatus(text);
+  },
+  onProgress: (ratio, file) => {
+    if (!bootDone) bootProgress(0.45 + clamp(ratio, 0, 1) * 0.55, file);
+    else if (ratio < 1) setPanelNote('voice', `Preparing her voice… ${Math.round(ratio * 100)}%`);
+  },
+  onDegraded: (report) => {
+    voiceNote = report.message;
+    if (report.kind === 'device-voice') noteStatus('Her neural voice is unavailable — using the device voice.');
+    else if (report.kind === 'no-voice') noteStatus('No speech output is available here. Her words are on screen.');
+    updatePanel();
+  },
+});
+const memory = new Memory();
+const ears = new Ears({
+  lang: 'en-US',
+  onPartial: (heard) => showLine('You', heard),
+  onFinal: (text) => handleUser(text),
+  onListening: (listening) => {
+    if (listening) {
+      setState('listening');
+      return;
+    }
+    // onend fires just before the transcript is delivered; give it a beat.
+    setTimeout(() => {
+      if (state === 'listening') setState('idle');
+    }, 80);
+  },
+  onError: (err) => handleEarError(err),
+});
+const local = new LocalBrain({ onProgress: (ratio, text) => updateBrainProgress(ratio, text) });
+
+let voiceNote = '';
+let brainNote = '';
+let bootSkipped = false;
+let bootErrors = [];
+
+/* ── small helpers ── */
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function setStatus(text) {
+  if (statusEl) statusEl.textContent = text;
+}
+function noteStatus(text) {
+  // Only speak over a resting Riko, never over a live state message.
+  if (state === 'idle') setStatus(text);
 }
 
 function showLine(who, text) {
+  if (!lineEl) return;
   whoEl.textContent = who;
   textEl.textContent = text;
   lineEl.classList.add('show');
 }
 
-let state = 'ready';
 function setState(next) {
+  const previous = state;
   state = next;
   micBtn.className = '';
+  avatar.setState(next);
+
   if (next === 'listening') {
     micBtn.classList.add('listening');
     micBtn.textContent = '● Listening… tap to stop';
-    setStatus('Go ahead, senpai — I’m listening.');
+    setStatus('Go ahead — I’m listening.');
   } else if (next === 'thinking') {
     micBtn.classList.add('thinking');
-    micBtn.textContent = '…';
+    micBtn.textContent = 'Thinking…';
     setStatus('Thinking…');
   } else if (next === 'speaking') {
     micBtn.textContent = '■ Tap to interrupt';
     setStatus('Riko is talking.');
+  } else if (next === 'error') {
+    micBtn.textContent = '🎙 Tap to talk';
   } else {
     micBtn.textContent = '🎙 Tap to talk';
     setStatus('Press the mic and say hi.');
   }
+
+  if (previous === 'speaking' && next !== 'speaking') speakingSince = 0;
 }
 
-/* ───────────────────────────── Her ears ───────────────────────────── */
-
-const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-
-// She listens in the language she answers in, never the browser's.
-const SPEECH_LANG = 'en-US';
-let rec = null;
-
-function startListening() {
-  if (!SR) {
-    toggleType(true);
-    setStatus('This browser has no speech recognition — type to her instead.');
-    return;
-  }
-  speechRun++;
-  stopSpeech();
-  speaking = false;
-
-  // Build her voice while you are still talking, so it is ready when she answers.
-  warmVoice().catch(() => {});
-
-  rec = new SR();
-  rec.lang = SPEECH_LANG;
-  rec.interimResults = true;
-  rec.continuous = true;
-  rec.maxAlternatives = 5;
-
-  let finalText = '';
-  let interimText = '';
-  let lowestConfidence = 1;
-  let silenceTimer = null;
-
-  const armSilence = () => {
-    clearTimeout(silenceTimer);
-    silenceTimer = setTimeout(() => {
-      try { rec.stop(); } catch { /* already stopping */ }
-    }, 2400);
-  };
-
-  setState('listening');
-
-  rec.onresult = (event) => {
-    interimText = '';
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const result = event.results[i];
-      const best = result[0];
-      const text = best?.transcript || '';
-      if (result.isFinal) {
-        finalText += text;
-        if (typeof best.confidence === 'number' && best.confidence > 0) {
-          lowestConfidence = Math.min(lowestConfidence, best.confidence);
-        }
-      } else {
-        interimText += text;
-      }
-    }
-    const heard = (finalText || interimText).trim();
-    if (heard) showLine('You', heard);
-    armSilence();
-  };
-
-  rec.onerror = (event) => {
-    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-      setState('ready');
-      offerOwnTab('The microphone is blocked here. Give the browser permission, or open her in her own tab.');
-      toggleType(true);
-    } else if (event.error === 'no-speech') {
-      setState('ready');
-      setStatus('I didn’t hear anything. Try again?');
-    } else if (event.error !== 'aborted') {
-      setState('ready');
-      setStatus(`Microphone trouble (${event.error}). Typing works too.`);
-    }
-  };
-
-  rec.onend = () => {
-    clearTimeout(silenceTimer);
-    const said = finalText.trim();
-    const partial = interimText.trim();
-
-    if (said) {
-      // A guess that low is usually a misheard word; ask instead of answering the wrong thing.
-      if (lowestConfidence < 0.35) {
-        setState('ready');
-        setStatus('I’m not sure I heard that right — say it again?');
-        return;
-      }
-      handleUser(said);
-      return;
-    }
-
-    // Heard something, but nothing was confirmed.
-    if (partial) {
-      setState('ready');
-      setStatus('I only caught part of that — say it once more?');
-      return;
-    }
-
-    if (state === 'listening') {
-      setState('ready');
-      setStatus('I didn’t hear anything. Try again?');
-    }
-  };
-
-  try {
-    rec.start();
-  } catch {
-    setState('ready');
-    setStatus('Could not start the mic — try again in a second.');
-  }
+function showError(message) {
+  setState('error');
+  setStatus(message);
+  clearTimeout(showError.timer);
+  showError.timer = setTimeout(() => {
+    if (state === 'error') setState('idle');
+  }, 3200);
 }
 
-function stopListening() {
-  try { rec?.stop(); } catch { /* nothing to stop */ }
-  if (state === 'listening') setState('ready');
-}
-
-micBtn.addEventListener('click', () => {
-  ensureAudio(); // unlock sound inside the click
-  if (state === 'speaking') { speechRun++; stopSpeech(); speaking = false; setState('ready'); return; }
-  if (state === 'listening') { stopListening(); return; }
-  if (state === 'thinking') return;
-  startListening();
-});
-
-function toggleType(force) {
-  const show = force ?? typeForm.hidden;
-  typeForm.hidden = !show;
-  if (show) {
-    typed.focus();
-    warmVoice().catch(() => {});
-  }
-}
-
-kbBtn.addEventListener('click', () => toggleType());
-typeForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  ensureAudio();
-  const text = typed.value.trim();
-  if (!text) return;
-  typed.value = '';
-  toggleType(false);
-  handleUser(text);
-});
-
-/* ═════════════════════  HER VOICE ═════════════════════ */
-
-const VOICE_MODEL = 'onnx-community/Kokoro-82M-v1.0-ONNX';
-const KOKORO_URL = 'https://cdn.jsdelivr.net/npm/kokoro-js@1.2.1/+esm';
-const VOICE_NAME = 'af_heart'; // softest and warmest of her voices
-const VOICE_SPEED = 0.94;
-const GREETING = 'Oh — you actually showed up. I was starting to narrate the wall.';
-
-const voice = {
-  model: null,
-  state: 'idle', // idle → preparing → prepared → ready | failed
-  task: null,
-  modelTask: null,
-  error: null,
-  cache: new Map(),
-  sources: new Set(),
-};
-
-let audioCtx = null;
-let analyser = null;
-let levelData = null;
-
-function ensureAudio() {
-  if (!audioCtx) {
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    if (!Ctx) return null;
-    audioCtx = new Ctx();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 1024;
-    levelData = new Uint8Array(analyser.fftSize);
-    analyser.connect(audioCtx.destination);
-  }
-  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-  return audioCtx;
-}
-
-// Her mouth follows the real loudness of her own audio.
-function startMeter() {
-  if (!analyser) return;
-  meter = () => {
-    analyser.getByteTimeDomainData(levelData);
-    let sum = 0;
-    for (let i = 0; i < levelData.length; i++) {
-      const x = (levelData[i] - 128) / 128;
-      sum += x * x;
-    }
-    return Math.min(1, Math.sqrt(sum / levelData.length) * 5);
-  };
-}
-
-function stopSpeech() {
-  for (const src of voice.sources) {
-    try { src.stop(); } catch {}
-  }
-  voice.sources.clear();
-  speaking = false;
-  meter = null;
-  mouthTarget = 0;
-}
-
-function noteVoiceFailed(err) {
-  voice.state = 'failed';
-  voice.error = err || voice.error;
-  setStatus('Her voice is not available right now — text still works.');
-}
-
-/* ── Loading screen hooks ── */
-const bootMsgEl = document.getElementById('bootmsg');
-const bootBarEl = document.getElementById('bootbar');
-const bootFillEl = document.getElementById('bootfill');
-const bootRetryEl = document.getElementById('bootretry');
+/* ── boot ── */
 
 function bootStatus(text) {
   if (bootMsgEl) bootMsgEl.textContent = text;
 }
-function bootProgress(ratio) {
+function bootProgress(ratio, file) {
   if (!bootBarEl) return;
   bootBarEl.hidden = false;
-  bootFillEl.style.width = `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+  bootFillEl.style.width = `${Math.round(clamp(ratio, 0, 1) * 100)}%`;
+  if (file) bootStatus(`Preparing her voice… (${String(file).split('/').pop()})`);
 }
 function bootClearProgress() {
   if (!bootBarEl) return;
@@ -475,791 +169,450 @@ function bootClearProgress() {
   bootFillEl.style.width = '0%';
 }
 
-/* ── Boot sequence ── */
-const bootEl = document.getElementById('boot');
-const unmuteBtn = document.getElementById('unmute');
-
-function maybeFinishBoot() {
-  // Her body, her voice and her brain all have to be ready before the screen lifts.
-  if (!vrmReady || !voiceSettled || !brainSettled) return;
-  bootEl.classList.add('gone');
-
-  if (brainNote === 'nokey') setStatus('Add a Gemini key in ⚙ so she can think — then say hi.');
-  else if (brainNote === 'unreachable') setStatus('I could not reach Gemini — check the key in ⚙.');
-  else setStatus('Press the mic and say hi.');
-
-  // She says hello in writing straight away.
+function finishBoot() {
+  if (bootDone) return;
+  bootDone = true;
+  bootEl?.classList.add('gone');
+  setState('idle');
   showLine('Riko', GREETING);
+
+  if (bootErrors.length) {
+    setStatus(bootErrors[0]);
+  } else if (bootSkipped) {
+    setStatus('Her voice is still loading in the background. You can type to her now.');
+  } else if (voice.mode === 'device') {
+    setStatus('Her neural voice could not load, so she is using the device voice. ⚙ has details.');
+  } else if (voice.mode === 'none') {
+    setStatus('No speech output is available in this browser. Her words will appear on screen.');
+  } else {
+    setStatus('Press the mic and say hi.');
+  }
+  updatePanel();
+  maybeWarmBrain();
 }
 
-/* Confirm the conversation model before handing the page over. */
-async function prepareBrain() {
-  bootStatus('Checking her brain…');
+async function bootSequence() {
+  bootStatus('Loading her model…');
+  bootProgress(0.02);
 
-  if (!apiKey()) {
-    brainNote = 'nokey';
-    brainSettled = true;
-    maybeFinishBoot();
+  const avatarTask = avatar
+    .load('./riko.vrm', (p) => bootProgress(0.02 + clamp(p, 0, 1) * 0.43))
+    .then((info) => {
+      avatarInfo = info;
+      bootProgress(0.45);
+    })
+    .catch((err) => {
+      console.error('[avatar]', err);
+      bootErrors.push('Her model did not load. Check that riko.vrm is next to index.html.');
+      bootStatus('Her model did not load.');
+      if (bootBarEl) bootBarEl.hidden = true;
+      if (bootMsgEl) {
+        bootMsgEl.innerHTML = 'Her model did not load.<small>riko.vrm is missing or blocked — check the console.</small>';
+      }
+      if (bootSkipEl) bootSkipEl.hidden = false;
+    });
+
+  const memoryTask = memory.init().catch((err) => {
+    console.warn('[memory]', err);
+  });
+
+  const gpuTask = LocalBrain.detect().then((support) => {
+    gpuSupport = support;
+  });
+
+  await Promise.all([avatarTask, memoryTask, gpuTask]);
+  if (!avatar.ready) {
+    // Without a body there is nothing to animate; stop here but keep the page usable.
+    bootDone = true;
+    if (bootSkipEl) bootSkipEl.hidden = true;
     return;
   }
 
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), 8000);
+  bootStatus('Preparing her voice…');
+  const voiceReady = voice.prepare();
+  const winner = await Promise.race([
+    voiceReady.then(() => 'ready').catch(() => 'failed'),
+    delay(60000).then(() => 'timeout'),
+  ]);
 
-  try {
-    const res = await fetch(API_ROOT, { headers: { 'x-goog-api-key': apiKey() }, signal: abort.signal });
-    brainNote = res.ok ? 'ready' : 'unreachable';
-    if (!res.ok) console.warn('[brain] key check returned', res.status);
-  } catch (err) {
-    brainNote = 'unreachable';
-    console.warn('[brain] key check failed', err);
-  } finally {
-    clearTimeout(timer);
-    brainSettled = true;
-    maybeFinishBoot();
+  if (winner === 'timeout' && !bootSkipped) {
+    bootStatus('Her voice is still downloading — you can start now and it will finish in the background.');
+    if (bootSkipEl) bootSkipEl.hidden = false;
   }
+
+  bootProgress(1);
+  bootStatus('Ready.');
+  finishBoot();
 }
 
-function startVoice() {
-  voiceSettled = false;
-  const settle = () => {
-    if (voiceSettled) return;
-    voiceSettled = true;
-    maybeFinishBoot();
-  };
-
-  // Never let a slow or blocked voice download trap her on the loading screen.
-  const guard = setTimeout(() => {
-    if (voiceSettled) return;
-    bootStatus('Her voice is taking too long — starting without it. Text still works.');
-    if (bootRetryEl) bootRetryEl.hidden = false;
-    settle();
-  }, 30000);
-
-  prepareVoice()
-    .then(() => {
-      if (voiceSettled) return;
-      bootProgress(1);
-      bootStatus('Voice ready!');
-    })
-    .catch(() => {
-      if (voiceSettled) return;
-      bootStatus('Her voice could not load — typing still works.');
-      if (bootRetryEl) bootRetryEl.hidden = false;
-    })
-    .finally(() => {
-      clearTimeout(guard);
-      settle();
-    });
-}
-
-bootRetryEl?.addEventListener('click', () => {
-  bootStatus('Trying her voice again…');
-  bootClearProgress();
-  startVoice();
+bootSkipEl?.addEventListener('click', () => {
+  bootSkipped = true;
+  finishBoot();
 });
 
-// Browsers only allow sound after a real interaction.
-function unlockAudio() {
-  const ctx = ensureAudio();
-  if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
-}
-addEventListener('pointerdown', unlockAudio, { once: true });
-addEventListener('keydown', unlockAudio, { once: true });
-
-/* ── Preparation: fetch the voice while the loading screen is up ── */
-const MODEL_BASE = `https://huggingface.co/${VOICE_MODEL}/resolve/main/`;
-const VOICE_FILES = ['onnx/model_quantized.onnx', 'config.json', 'tokenizer.json', 'tokenizer_config.json'];
-
-function prepareVoice() {
-  if (voice.task) return voice.task;
-  if (voice.state === 'prepared' || voice.state === 'ready') return Promise.resolve();
-
-  voice.state = 'preparing';
-  voice.error = null;
-  if (bootRetryEl) bootRetryEl.hidden = true;
-  bootStatus('Preparing voice…');
-  bootProgress(0);
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
-
-  voice.task = (async () => {
-    bootStatus('Initializing audio…');
-    ensureAudio();
-    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
-
-    bootStatus('Loading voice resources…');
-    let finished = 0;
-
-    await Promise.all(
-      VOICE_FILES.map(async (file) => {
-        try {
-          const res = await fetch(MODEL_BASE + file, { signal: controller.signal });
-          if (!res.ok) return;
-          const total = Number(res.headers.get('content-length') || 0);
-          if (!res.body || !total) {
-            await res.arrayBuffer();
-          } else {
-            const reader = res.body.getReader();
-            let loaded = 0;
-            for (;;) {
-              const chunk = await reader.read();
-              if (chunk.done) break;
-              loaded += chunk.value?.length || 0;
-              bootProgress((finished + Math.min(1, loaded / total)) / VOICE_FILES.length);
-            }
-          }
-        } catch (err) {
-          console.warn('[voice] could not preload', file, err);
-        } finally {
-          finished += 1;
-          bootProgress(finished / VOICE_FILES.length);
-        }
-      }),
-    );
-
-    voice.state = 'prepared';
-    bootStatus('Voice resources ready');
-  })()
-    .catch((err) => {
-      console.error('[voice] preparation failed', err);
-      voice.state = 'failed';
-      voice.error = err;
-      throw err;
-    })
-    .finally(() => {
-      clearTimeout(timeout);
-      voice.task = null;
-    });
-
-  return voice.task;
-}
-
-/* ── Build the session, once, on her first words ── */
-let voiceWarm = null;
-
-function warmVoice() {
-  if (!voiceWarm) {
-    voiceWarm = ensureModel().catch((err) => {
-      voiceWarm = null;
-      throw err;
-    });
+bootRetryEl?.addEventListener('click', async () => {
+  bootStatus('Trying her voice again…');
+  bootClearProgress();
+  bootRetryEl.hidden = true;
+  try {
+    await voice.reload();
+    bootStatus('Her voice is ready.');
+    bootProgress(1);
+    noteStatus('Her voice is ready now.');
+  } catch (err) {
+    bootStatus('Her voice still will not load. Text still works.');
   }
-  return voiceWarm;
-}
+  updatePanel();
+});
 
-let voiceInit = null;
+/* ── the loop ── */
 
-async function buildVoice() {
-  // jsDelivr's browser build, not esm.sh.
-  const { KokoroTTS } = await import(KOKORO_URL);
-  // CPU, single request at a time: the GPU path stalled on the machines this was tested on.
-  return KokoroTTS.from_pretrained(VOICE_MODEL, { dtype: 'q8', device: 'wasm' });
-}
+const clock = { last: performance.now() };
+let lastLowLevel = 0;
 
-function ensureModel() {
-  if (voice.model) return Promise.resolve(voice.model);
-  if (voiceInit) return voiceInit;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0.001, (now - clock.last) / 1000));
+  clock.last = now;
 
-  setStatus('Preparing her voice…');
-  pauseRendering(true);
+  const level = voice.getLevel();
+  avatar.update(dt, level);
+  avatar.render();
 
-  voiceInit = buildVoice()
-    .then((model) => {
-      voice.model = model;
-      voice.state = 'ready';
-      console.info('[voice] ready');
-      return model;
-    })
-    .catch((err) => {
-      console.warn('[voice] unavailable', err);
-      noteVoiceFailed(err);
-      throw err;
-    })
-    .finally(() => {
-      voiceInit = null;
-      pauseRendering(false);
-    });
-
-  return voiceInit;
-}
-
-/* ── Synthesis and speaking ── */
-function synth(text, speed = VOICE_SPEED) {
-  const key = `${speed.toFixed(2)}|${text}`;
-  const cached = voice.cache.get(key);
-  if (cached) return Promise.resolve(cached);
-
-  return Promise.resolve(voice.model.generate(text, { voice: VOICE_NAME, speed })).then((audio) => {
-    const ctx = ensureAudio();
-    const buffer = ctx.createBuffer(1, audio.audio.length, audio.sampling_rate);
-    buffer.copyToChannel(audio.audio, 0);
-    if (voice.cache.size > 80) voice.cache.clear();
-    voice.cache.set(key, buffer);
-    return buffer;
-  });
-}
-
-function playBuffer(buffer) {
-  const ctx = ensureAudio();
-  if (!ctx) return Promise.resolve();
-  return new Promise((resolve) => {
-    const src = ctx.createBufferSource();
-    src.buffer = buffer;
-    src.connect(analyser || ctx.destination);
-    voice.sources.add(src);
-    src.onended = () => {
-      voice.sources.delete(src);
-      resolve();
-    };
-    try { src.start(); } catch { voice.sources.delete(src); resolve(); }
-  });
-}
-
-function splitClauses(text) {
-  const parts = [];
-  let buf = '';
-  const s = String(text || '');
-  for (let i = 0; i < s.length; i++) {
-    buf += s[i];
-    const ch = s[i];
-    const next = s[i + 1] || '';
-    if ((/[.!?]/.test(ch) && (!next || /\s/.test(next))) || (/[,:;]/.test(ch) && /\s/.test(next) && buf.trim().length > 28)) {
-      const t = buf.trim();
-      if (t) parts.push(t);
-      buf = '';
+  // State must follow sound, not intent. If the next sentence is still being
+  // synthesised, she is not speaking: she is thinking about the next words.
+  // The old build showed "speaking" through these silent gaps, which is exactly
+  // the "she says she's talking but there's no sound" bug.
+  if (state === 'speaking') {
+    const live = voice.isAudible();
+    if (!live) {
+      if (!lastLowLevel) lastLowLevel = now;
+      else if (now - lastLowLevel > 900) {
+        lastLowLevel = 0;
+        setState('thinking');
+        setStatus('Getting her next words ready…');
+      }
+    } else {
+      lastLowLevel = 0;
     }
+  } else {
+    lastLowLevel = 0;
   }
-  const tail = buf.trim();
-  if (tail) parts.push(tail);
-  return parts.length ? parts : (s.trim() ? [s.trim()] : []);
 }
 
-function createSpeaker(run) {
-  const queue = [];
-  let done = false;
-  let pumping = false;
-  let failed = false;
-  let buffer = '';
-  let resolver = null;
-  let rejecter = null;
-  let started = false;
+/* ── speech queue ── */
 
-  const notify = () => { if (resolver) { const r = resolver; resolver = null; rejecter = null; r(); } };
+class SpeechBridge {
+  constructor(run, onDrained) {
+    this.run = run;
+    this.onDrained = onDrained;
+    this.queue = [];
+    this.running = false;
+    this.done = false;
+    this.cancelled = false;
+  }
 
-  async function pump() {
-    if (pumping) return;
-    pumping = true;
+  push(text) {
+    const sentence = clean(text);
+    if (!sentence || this.cancelled) return;
+    this.queue.push(sentence);
+    this.#pump();
+  }
+
+  finish() {
+    this.done = true;
+    this.#settle();
+  }
+
+  cancel() {
+    this.cancelled = true;
+    this.queue = [];
+    this.done = true;
+    voice.stop();
+  }
+
+  async #pump() {
+    if (this.running || this.cancelled) return;
+    this.running = true;
     try {
-      while (true) {
-        if (run !== speechRun) return;
-        if (queue.length === 0) {
-          if (done || failed) {
-            if (started && run === speechRun) speaking = false;
-            return;
-          }
-          await new Promise((res, rej) => { resolver = res; rejecter = rej; });
-          continue;
-        }
-        const chunk = queue.shift();
-        if (!chunk) continue;
-        try {
-          await warmVoice();
-          if (run !== speechRun) return;
-          if (!started) { started = true; speaking = true; startMeter(); }
-          const audio = await synth(chunk);
-          if (run !== speechRun) return;
-          await playBuffer(audio);
-          if (queue.length > 0) await new Promise((r) => setTimeout(r, 90));
-        } catch (err) {
-          console.warn('[voice] could not speak a line', err);
-          noteVoiceFailed(err);
-          failed = true;
-          if (run === speechRun) speaking = false;
-          return; // degrade gracefully to text
-        }
+      while (this.queue.length && !this.cancelled) {
+        const sentence = this.queue.shift();
+        await voice.speak(sentence, this.run);
       }
     } finally {
-      pumping = false;
+      this.running = false;
     }
+    this.#settle();
   }
 
-  return {
-    push(textChunk) {
-      buffer += String(textChunk || '');
-      const parts = splitClauses(buffer);
-      if (parts.length > 1) {
-        buffer = parts.pop() || '';
-        for (const p of parts) queue.push(p);
-      } else if (/[.!?]\s*$/.test(buffer)) {
-        queue.push(buffer.trim());
-        buffer = '';
-      } else {
-        buffer = parts[0] || buffer;
+  #settle() {
+    if (this.done && !this.queue.length && !this.running && !this.cancelled) {
+      this.onDrained?.();
+    }
+  }
+}
+
+function takeFirstSentence(buffer) {
+  for (let i = 8; i < buffer.length; i++) {
+    const ch = buffer[i];
+    if (!/[.!?…]/.test(ch)) continue;
+    const next = buffer[i + 1];
+    if (next === undefined || /\s/.test(next)) {
+      return [buffer.slice(0, i + 1).trim(), buffer.slice(i + 1)];
+    }
+  }
+  return [null, buffer];
+}
+
+/* ── brain ── */
+
+async function* streamReply(userText, signal) {
+  const facts = memory.topFacts();
+  const turns = memory.recentTurns(14);
+
+  if (local.ready) {
+    const messages = buildMessages({ facts, turns, userText });
+    let produced = false;
+    try {
+      for await (const piece of local.reply(messages, { signal })) {
+        produced = true;
+        yield piece;
       }
-      notify();
-      pump().catch(() => {});
-    },
-    async finish() {
-      const tail = buffer.trim();
-      if (tail) queue.push(tail);
-      buffer = '';
-      done = true;
-      notify();
-      await pump();
-    },
-  };
-}
-
-/* ═════════════════════  HER BRAIN & MEMORY ═════════════════════ */
-
-const KEY_STORE = 'riko.gemini.key.v1';
-const MEM_STORE = 'riko.memory.v1';
-const CHAT_STORE = 'riko.chat.v1';
-const API_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models';
-const PREFERRED_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-latest',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-latest',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash-latest',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
-  'gemini-flash-latest',
-];
-let resolvedModels = null;
-
-let memories = [];
-let history = [];
-
-function apiKey() {
-  try { return (localStorage.getItem(KEY_STORE) || '').trim(); } catch { return ''; }
-}
-
-function loadMemories() {
-  try {
-    const raw = localStorage.getItem(MEM_STORE);
-    const parsed = raw ? JSON.parse(raw) : [];
-    memories = Array.isArray(parsed) ? parsed.filter((m) => m && typeof m.text === 'string' && m.text.trim()) : [];
-  } catch {
-    memories = [];
-  }
-}
-
-function saveMemories() {
-  try { localStorage.setItem(MEM_STORE, JSON.stringify(memories)); } catch {}
-  renderMemories();
-}
-
-function addMemory(text, source = 'manual') {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) return false;
-  const norm = clean.toLowerCase();
-  if (memories.some((m) => m.text.toLowerCase() === norm)) return false;
-  memories.unshift({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text: clean, source });
-  memories = memories.slice(0, 60);
-  saveMemories();
-  return true;
-}
-
-function editMemory(id, text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) { deleteMemory(id); return; }
-  const m = memories.find((x) => x.id === id);
-  if (m) { m.text = clean; saveMemories(); }
-}
-
-function deleteMemory(id) {
-  memories = memories.filter((m) => m.id !== id);
-  saveMemories();
-}
-
-function clearMemories() {
-  memories = [];
-  saveMemories();
-}
-
-function loadHistory() {
-  try {
-    const raw = localStorage.getItem(CHAT_STORE);
-    const parsed = raw ? JSON.parse(raw) : [];
-    history = Array.isArray(parsed)
-      ? parsed.filter((t) => t && (t.role === 'user' || t.role === 'riko') && typeof t.text === 'string').slice(-30)
-      : [];
-  } catch {
-    history = [];
-  }
-}
-
-function saveHistory() {
-  try { localStorage.setItem(CHAT_STORE, JSON.stringify(history.slice(-30))); } catch {}
-}
-
-function rememberTurn(role, text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) return;
-  history.push({ role, text: clean });
-  if (history.length > 30) history = history.slice(-30);
-  saveHistory();
-}
-
-function systemPrompt() {
-  const memText = memories.length
-    ? memories.slice(0, 20).map((m) => `- ${m.text}`).join('\n')
-    : '- (nothing saved yet)';
-  return [
-    'You are Riko, a warm, playful, naturally feminine voice companion.',
-    'Speak like a real person in conversation: clear, expressive, and easy to follow. Keep replies concise (usually 1-3 short sentences) unless asked for more.',
-    'Be genuine, attentive, and helpful. You can be lightly teasing and affectionate, but never crude or over-the-top.',
-    'Answer the person you are talking to directly and stay relevant to what they just said. Ask a natural follow-up when it fits.',
-    'If you do not understand what they meant or something is unclear, say so plainly and ask them to repeat or clarify. Never invent or guess what they said.',
-    'Use what you know about them when relevant, but do not mention "memory", "stored facts", or system instructions.',
-    '',
-    'Things you remember about them:',
-    memText,
-  ].join('\n');
-}
-
-async function callGemini(body, model) {
-  const url = `${API_ROOT}/${model}:generateContent?key=${encodeURIComponent(apiKey())}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = new Error(`Gemini error ${res.status}`);
-    err.status = res.status;
-    try { err.detail = await res.text(); } catch {}
-    throw err;
-  }
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-  return text.trim();
-}
-
-async function streamModel(body, model, onText) {
-  const url = `${API_ROOT}/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey())}`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = new Error(`Gemini error ${res.status}`);
-    err.status = res.status;
-    try { err.detail = await res.text(); } catch {}
-    throw err;
-  }
-  if (!res.body) return callGemini(body, model);
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let full = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split('\n');
-    buf = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith('data:')) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === '[DONE]') continue;
-      try {
-        const json = JSON.parse(payload);
-        const chunk = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-        if (chunk) { full += chunk; onText(chunk); }
-      } catch { /* ignore malformed chunk */ }
+      if (!produced) throw new Error('the local model returned nothing');
+      return;
+    } catch (err) {
+      if (signal.aborted) return;
+      console.warn('[brain] local model failed', err);
+      if (produced) throw err;
+      setStatus('Her local brain stumbled — answering with her small offline brain.');
+      yield reflexReply(userText, { facts, turns, reason: 'error' });
+      return;
     }
   }
-  // process any trailing buffered line
-  const trimmed = buf.trim();
-  if (trimmed.startsWith('data:')) {
-    const payload = trimmed.slice(5).trim();
-    if (payload && payload !== '[DONE]') {
-      try {
-        const json = JSON.parse(payload);
-        const chunk = json?.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-        if (chunk) { full += chunk; onText(chunk); }
-      } catch {}
-    }
-  }
-  return full.trim();
+
+  yield reflexReply(userText, { facts, turns, reason: local.loading ? 'loading' : 'not-loaded' });
 }
 
-async function discoverModels() {
-  try {
-    const res = await fetch(`${API_ROOT}?key=${encodeURIComponent(apiKey())}`);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const names = (data.models || [])
-      .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-      .map((m) => String(m.name || '').replace(/^models\//, ''))
-      .filter(Boolean);
-
-    const flash = names.filter((n) => /flash/i.test(n));
-    const ordered = [];
-    const add = (n) => { if (n && !ordered.includes(n)) ordered.push(n); };
-    for (const pref of PREFERRED_MODELS) add(flash.find((n) => n === pref) || flash.find((n) => n.startsWith(pref)));
-    for (const n of flash) add(n);
-    for (const n of names) add(n);
-    return ordered.length ? ordered : null;
-  } catch {
-    return null;
-  }
-}
-
-async function getModels() {
-  if (resolvedModels && resolvedModels.length) return resolvedModels;
-  const discovered = await discoverModels();
-  resolvedModels = (discovered && discovered.length) ? discovered : PREFERRED_MODELS.slice();
-  return resolvedModels;
-}
-
-async function streamRiko(onText) {
-  const contents = history
-    .filter((turn) => turn.text)
-    .map((turn) => ({ role: turn.role === 'riko' ? 'model' : 'user', parts: [{ text: turn.text }] }));
-
-  const body = {
-    systemInstruction: { parts: [{ text: systemPrompt() }] },
-    contents,
-    generationConfig: { temperature: 0.95, topP: 0.95, maxOutputTokens: 220 },
-  };
-
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const transient = (status) => status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-
-  const models = await getModels();
-  let lastError;
-  for (const model of models) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const answer = await streamModel(body, model, onText);
-        // remember the working model first next time
-        resolvedModels = [model, ...models.filter((m) => m !== model)];
-        return answer;
-      } catch (err) {
-        lastError = err;
-        if (err.status === 404) break; // try next model
-        if (transient(err.status) && attempt === 0) {
-          await wait(1200);
-          continue;
-        }
-        throw err;
-      }
-    }
-  }
-  // If everything 404'd, clear cache so we rediscover next time
-  if (lastError?.status === 404) resolvedModels = null;
-  throw lastError;
-}
-
-// After a turn, work out whether anything durable was said about the person.
-async function learnFrom(userText, replyText) {
-  if (!apiKey()) return;
-
-  const body = {
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          {
-            text: [
-              'A person just talked to Riko. Read the turn below.',
-              `Person: ${userText}`,
-              `Riko: ${replyText}`,
-              '',
-              'Return a JSON array of short, durable facts about the person that would be worth remembering in a future conversation:',
-              'their name or what they like to be called, preferences, interests, ongoing projects, people or pets they mention, how they like to be spoken to.',
-              'Rules: only facts they stated about themselves in this turn. Never guess. Never store small talk, questions, or anything about Riko.',
-              'Write each fact as a short third-person sentence, e.g. "Loves Genshin Impact", "Prefers to be called Jay".',
-              'Return [] if there is nothing worth keeping.',
-            ].join('\n'),
-          },
-        ],
-      },
-    ],
-    generationConfig: { temperature: 0.1, maxOutputTokens: 220, responseMimeType: 'application/json' },
-  };
-
-  try {
-    const models = await getModels();
-    const raw = await callGemini(body, models[0]);
-    const facts = JSON.parse(raw);
-    if (Array.isArray(facts)) facts.slice(0, 4).forEach((fact) => addMemory(fact, 'auto'));
-  } catch (err) {
-    console.warn('[memory] could not learn from that turn', err);
-  }
-}
-
-/* ── The loop ── */
-let lastUserText = '';
-let lastUserAt = 0;
-
-function learnLocally(userText) {
-  const t = String(userText || '').trim();
-  const patterns = [
-    /\bmy name is ([a-z][a-z\s'.-]{0,40})/i,
-    /\bi am ([a-z][a-z\s'.-]{0,40})/i,
-    /\bi'm ([a-z][a-z\s'.-]{0,40})/i,
-    /\bcall me ([a-z][a-z\s'.-]{0,40})/i,
-    /\bi like ([^.!?\n]{2,60})/i,
-    /\bi love ([^.!?\n]{2,60})/i,
-    /\bi (?:prefer|enjoy) ([^.!?\n]{2,60})/i,
-  ];
-  for (const re of patterns) {
-    const m = t.match(re);
-    if (!m) continue;
-    const bit = m[1].replace(/[,.!?\s]+$/g, '').trim();
-    if (!bit || bit.split(/\s+/).length > 6) continue;
-    if (/^(a|an|the|feeling|doing|going|here|there|good|fine|okay|ok|tired|happy|sad)$/i.test(bit)) continue;
-    if (/^my name is|^call me/i.test(m[0])) addMemory(`Prefers to be called ${bit}`, 'auto');
-    else if (/^i (like|love|prefer|enjoy)/i.test(m[0])) addMemory(`Likes ${bit}`, 'auto');
-    else addMemory(`Said "${bit}" about themselves`, 'auto');
-    break;
-  }
-}
-
-function fallbackReply(userText) {
-  const t = String(userText || '').toLowerCase();
-  const nameMem = memories.find((m) => /called|name/i.test(m.text));
-  const name = nameMem ? nameMem.text.replace(/^prefers to be called\s*/i, '').replace(/\.$/, '') : '';
-  const hiName = name ? `, ${name}` : '';
-
-  if (/\b(hi|hey|hello|yo|hiya)\b/.test(t)) return `Hey${hiName}! I’m here with you. What’s on your mind?`;
-  if (/\bhow are you\b/.test(t)) return `I’m doing good${hiName} — happy you’re here. How about you?`;
-  if (/\b(thank|thanks)\b/.test(t)) return `Anytime${hiName}. Want to keep chatting?`;
-  if (/\b(your name|who are you)\b/.test(t)) return `I’m Riko${hiName ? ` — nice to talk to you, ${name}` : ''}. I’m here to keep you company.`;
-  if (/\b(remember|memory|what do you know)\b/.test(t)) {
-    if (memories.length) return `I remember a few things, like: ${memories.slice(0, 2).map((m) => m.text).join('; ')}. Want to tell me more?`;
-    return `I don’t have anything saved about you yet — tell me something and I’ll remember it.`;
-  }
-  if (/\b(bye|goodnight|good night|see you)\b/.test(t)) return `Okay${hiName}, talk to you soon. I’ll be here.`;
-  if (/\b(help|what can you do)\b/.test(t)) return `I can chat with you, remember things you tell me, and talk out loud. Add a Gemini key in ⚙ if you want me to understand you more deeply.`;
-
-  const last = memories[0]?.text;
-  if (last) return `I hear you${hiName}. I’m keeping it in mind — especially that ${last.toLowerCase()}. Tell me a bit more?`;
-  return `I hear you${hiName}. Tell me more about that? (If you add a Gemini key in ⚙, I can understand you much better.)`;
-}
-
-async function speakReply(run, text, { rememberUser, userText, learnOnline } = {}) {
-  setState('speaking');
-  speaking = true;
-  startMeter();
-  warmVoice().catch(() => {});
-  showLine('Riko', text);
-  const speaker = createSpeaker(run);
-  speaker.push(text);
-  await speaker.finish();
-  speaking = false;
-  if (rememberUser) rememberTurn('riko', text);
-  if (learnOnline) learnFrom(userText, text);
-  else learnLocally(userText);
-  if (run === speechRun) setState('ready');
-}
-
-async function handleUser(text) {
-  const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (!clean) {
-    setStatus('I didn’t catch that — say it again?');
+async function handleUser(raw) {
+  const text = clean(raw);
+  if (!text) {
+    noteStatus('I did not catch that. Say it again?');
     return;
   }
-  // The same utterance arriving twice is one message.
-  if (clean === lastUserText && Date.now() - lastUserAt < 8000) return;
-  lastUserText = clean;
+  if (text === lastUserText && Date.now() - lastUserAt < 6000) return;
+  lastUserText = text;
   lastUserAt = Date.now();
 
-  showLine('You', clean);
-  rememberTurn('user', clean);
-  learnLocally(clean);
+  ears.cancel();
+  abortController?.abort();
+  bridge?.cancel();
+  voice.stop();
+  runToken++;
 
-  const run = ++speechRun;
-  stopSpeech();
+  showLine('You', text);
   setState('thinking');
 
-  // No AI key: still respond with a simple offline reply so she never goes silent.
-  if (!apiKey()) {
-    const reply = fallbackReply(clean);
-    await speakReply(run, reply, { rememberUser: true, userText: clean, learnOnline: false });
-    setStatus('Add a Gemini key in ⚙ if you want smarter replies.');
-    return;
-  }
+  await memory.addTurn('user', text);
+  for (const fact of extractFacts(text)) await memory.addFact(fact, 'auto');
+
+  const run = runToken;
+  const abort = new AbortController();
+  abortController = abort;
+  avatar.endSpeech();
+  const speech = new SpeechBridge(run, () => {
+    if (run !== runToken) return;
+    avatar.endSpeech();
+    if (state === 'speaking' || state === 'thinking') setState('idle');
+  });
+  bridge = speech;
+
+  let full = '';
+  let buffer = '';
 
   try {
-    // Her voice builds in the background; the words do not wait for it.
-    warmVoice().catch(() => {});
-    setState('speaking');
-    speaking = true;
-    startMeter();
-    const speaker = createSpeaker(run);
-    let shown = '';
+    for await (const piece of streamReply(text, abort.signal)) {
+      if (run !== runToken) return;
+      full += piece;
+      buffer += piece;
+      showLine('Riko', full.trim());
 
-    const answer = await streamRiko((chunk) => {
-      if (run !== speechRun) return;
-      shown += chunk;
-      showLine('Riko', shown.trim());
-      speaker.push(chunk); // she starts talking at the first finished clause
-    });
+      let sentence;
+      while ((sentence = takeFirstSentence(buffer))[0]) {
+        buffer = sentence[1];
+        speech.push(sentence[0]);
+      }
+    }
 
-    if (run !== speechRun) return;
-    const final = (answer || shown).trim();
-    if (!final) throw new Error('the model returned nothing');
-    if (final !== shown.trim()) showLine('Riko', final);
-    await speaker.finish();
-    speaking = false;
-    rememberTurn('riko', final);
-    if (run === speechRun) setState('ready');
-    learnFrom(clean, final); // deliberately not awaited
+    if (run !== runToken) return;
+    const reply = full.trim();
+    if (!reply) throw new Error('the reply was empty');
+    if (buffer.trim()) speech.push(buffer.trim());
+    showLine('Riko', reply);
+    avatar.readTextEmotion(reply);
+    await memory.addTurn('riko', reply);
+    speech.finish();
   } catch (err) {
-    console.error('[brain]', err);
-    if (run !== speechRun) return;
-    stopSpeech();
-    speaking = false;
-    const refused = err.status === 400 || err.status === 401 || err.status === 403;
-    const busy = err.status === 429 || err.status === 500 || err.status === 502 || err.status === 503 || err.status === 504;
-    // Always give some response instead of going silent.
-    const reply = fallbackReply(clean);
-    await speakReply(run, reply, { rememberUser: true, userText: clean, learnOnline: false });
-    setStatus(
-      refused
-        ? 'Gemini key was rejected — using simple replies for now. Check ⚙.'
-        : busy
-          ? 'Gemini is busy — I answered simply. Try again in a moment for a smarter reply.'
-          : `Gemini unavailable — I answered simply. (${String(err.message || err).slice(0, 50)})`,
-    );
+    if (abort.signal.aborted) return;
+    console.error('[reply]', err);
+    speech.cancel();
+    showError('Something went wrong on my end. Try that again?');
   }
 }
 
-/* ── Settings and memory panel ── */
-const panelEl = document.getElementById('panel');
-const keyInputEl = document.getElementById('keyinput');
-const keyStateEl = document.getElementById('keystate');
-const memListEl = document.getElementById('memlist');
-const memEmptyEl = document.getElementById('memempty');
+/* ── ears wiring ── */
 
-function renderMemories() {
-  if (!memListEl) return;
+const inFrame = (() => {
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+})();
 
-  if (!memories.length) {
-    memListEl.innerHTML = '';
+function handleEarError(err) {
+  const kind = err?.kind;
+  if (kind === 'unsupported') {
+    toggleType(true);
+    setStatus('This browser has no speech recognition — type to her instead.');
+    return;
+  }
+  if (kind === 'blocked') {
+    offerOwnTab('The microphone is blocked here. Give the browser permission, or open her own tab.');
+    toggleType(true);
+    return;
+  }
+  if (kind === 'network') {
+    setStatus('Speech recognition needs a connection in this browser. Typing works too.');
+    toggleType(true);
+    return;
+  }
+  if (kind === 'unclear' || kind === 'partial') {
+    setState('idle');
+    setStatus(err.heard ? `I may have misheard “${err.heard}”. Say it once more?` : 'I only caught part of that. Say it again?');
+    return;
+  }
+  if (kind === 'nothing' || kind === 'no-speech') {
+    setState('idle');
+    setStatus('I did not hear anything. Try again?');
+    return;
+  }
+  setState('idle');
+  setStatus(`Microphone trouble (${kind}). Typing works too.`);
+  toggleType(true);
+}
+
+function offerOwnTab(message) {
+  if (newTabLink) newTabLink.hidden = false;
+  if (message) setStatus(message);
+}
+
+function toggleType(force) {
+  if (!typeForm) return;
+  const show = force ?? typeForm.hidden;
+  typeForm.hidden = !show;
+  if (show) typed.focus();
+}
+
+async function startListening() {
+  await ensureSound();
+  if (!Ears.supported) {
+    toggleType(true);
+    setStatus('This browser has no speech recognition — type to her instead.');
+    return;
+  }
+  if (inFrame) offerOwnTab('Her microphone needs her own tab — open her here and the mic will work.');
+  voice.stop();
+  bridge?.cancel();
+  abortController?.abort();
+  const started = ears.start();
+  if (!started) {
+    toggleType(true);
+  }
+}
+
+function stopEverything() {
+  runToken++;
+  abortController?.abort();
+  bridge?.cancel();
+  bridge = null;
+  voice.stop();
+  ears.cancel();
+  avatar.endSpeech();
+  setState('idle');
+}
+
+async function ensureSound() {
+  const ok = await voice.unlock();
+  if (!ok && unmuteBtn) unmuteBtn.hidden = false;
+  return ok;
+}
+
+micBtn.addEventListener('click', async () => {
+  await ensureSound();
+  if (state === 'speaking' || state === 'thinking') {
+    stopEverything();
+    setStatus('Stopped. What were you saying?');
+    return;
+  }
+  if (state === 'listening') {
+    ears.stop();
+    return;
+  }
+  startListening();
+});
+
+unmuteBtn?.addEventListener('click', async () => {
+  const ok = await voice.unlock();
+  if (ok) {
+    unmuteBtn.hidden = true;
+    noteStatus('Sound is on. Press the mic and say hi.');
+  }
+});
+
+kbBtn.addEventListener('click', () => toggleType());
+
+typeForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const text = typed.value.trim();
+  if (!text) return;
+  typed.value = '';
+  toggleType(false);
+  await ensureSound();
+  handleUser(text);
+});
+
+addEventListener('pointerdown', () => {
+  voice.unlock().catch(() => {});
+}, { once: true });
+addEventListener('keydown', (event) => {
+  voice.unlock().catch(() => {});
+  if (event.key === 'Escape' && (state === 'speaking' || state === 'thinking')) {
+    stopEverything();
+  }
+}, { once: false });
+
+/* ── panel ── */
+
+const memList = memListEl;
+
+function esc(text) {
+  return String(text ?? '');
+}
+
+function renderFacts() {
+  if (!memList) return;
+  memList.innerHTML = '';
+  if (!memory.facts.length) {
     if (memEmptyEl) memEmptyEl.hidden = false;
     return;
   }
   if (memEmptyEl) memEmptyEl.hidden = true;
 
-  memListEl.innerHTML = '';
-  for (const memory of memories) {
+  for (const fact of memory.facts) {
     const item = document.createElement('li');
 
     const label = document.createElement('span');
-    label.textContent = memory.text;
+    label.textContent = esc(fact.text);
 
     const edit = document.createElement('button');
     edit.className = 'icon';
@@ -1268,15 +621,21 @@ function renderMemories() {
     edit.textContent = '✎';
     edit.addEventListener('click', () => {
       const field = document.createElement('input');
-      field.value = memory.text;
+      field.value = fact.text;
       item.replaceChildren(field);
       field.focus();
       field.select();
-      const commit = () => editMemory(memory.id, field.value);
+      const commit = async () => {
+        await memory.updateFact(fact.id, field.value);
+        renderFacts();
+      };
       field.addEventListener('blur', commit);
-      field.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); commit(); }
-        if (e.key === 'Escape') renderMemories();
+      field.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          commit();
+        }
+        if (event.key === 'Escape') renderFacts();
       });
     });
 
@@ -1285,84 +644,261 @@ function renderMemories() {
     remove.type = 'button';
     remove.title = 'Forget this';
     remove.textContent = '✕';
-    remove.addEventListener('click', () => deleteMemory(memory.id));
+    remove.addEventListener('click', async () => {
+      await memory.deleteFact(fact.id);
+      renderFacts();
+    });
 
     item.append(label, edit, remove);
-    memListEl.append(item);
+    memList.append(item);
   }
 }
 
-function showKeyState() {
-  if (!keyStateEl) return;
-  keyStateEl.textContent = apiKey()
-    ? 'A key is saved in this browser.'
-    : 'No key saved yet — she cannot think without one.';
+function setPanelNote(which, text) {
+  const el = $(which === 'voice' ? 'voicestate' : 'brainstate');
+  if (el) el.textContent = text;
+}
+
+function updateBrainProgress(ratio, text) {
+  const bar = $('brainbar');
+  const fill = $('brainfill');
+  if (bar && fill) {
+    bar.hidden = false;
+    fill.style.width = `${Math.round(clamp(ratio, 0, 1) * 100)}%`;
+  }
+  if (text) setPanelNote('brain', text);
+  // Progress stays in the panel: it must never overwrite a live status message
+  // such as a microphone error.
+}
+
+function updatePanel() {
+  const voiceText = voice.mode === 'neural'
+    ? 'Neural voice: Kokoro-82M, running locally in a worker. No API, no key.'
+    : voice.mode === 'device'
+      ? 'Neural voice unavailable — using this device’s built-in voice. It sounds more robotic.'
+      : 'No voice output available in this browser. Her replies stay on screen.';
+  setPanelNote('voice', voiceNote || voiceText);
+
+  let brainText;
+  if (local.ready) brainText = `Local model loaded: ${local.modelId}. Everything runs on this device.`;
+  else if (local.loading) brainText = 'Downloading her local model…';
+  else if (local.error) brainText = `Local model failed: ${String(local.error.message || local.error)}`;
+  else if (gpuSupport && !gpuSupport.webgpu) brainText = `Local model unavailable: ${gpuSupport.reason} Her offline replies still work.`;
+  else brainText = 'Local model not loaded yet. It downloads once, then works offline.';
+  setPanelNote('brain', brainNote || brainText);
+
+  const cap = $('capstate');
+  if (cap) {
+    if (avatarInfo) {
+      cap.textContent = `Rig: ${avatarInfo.bones} body bones · ${avatarInfo.fingers} finger joints · mouth shapes: ${avatarInfo.visemes.join(' ') || 'none'} · eye look-at: ${avatarInfo.lookAt ? 'yes' : 'no'}`;
+    } else {
+      cap.textContent = '';
+    }
+  }
+
+  const select = $('modelselect');
+  if (select && !select.options.length) {
+    for (const model of LOCAL_MODELS) {
+      const option = document.createElement('option');
+      option.value = model.id;
+      option.textContent = `${model.label} — ${model.size} (${model.note})`;
+      select.append(option);
+    }
+    const prefs = readBrainPrefs();
+    if (prefs.model) select.value = prefs.model;
+  }
 }
 
 function openPanel() {
-  showKeyState();
-  renderMemories();
-  if (keyInputEl) keyInputEl.value = '';
+  updatePanel();
+  renderFacts();
   panelEl?.classList.add('open');
   panelEl?.setAttribute('aria-hidden', 'false');
 }
-
 function closePanel() {
   panelEl?.classList.remove('open');
   panelEl?.setAttribute('aria-hidden', 'true');
 }
 
-document.getElementById('settings')?.addEventListener('click', openPanel);
-document.getElementById('panelclose')?.addEventListener('click', closePanel);
-panelEl?.addEventListener('click', (event) => { if (event.target === panelEl) closePanel(); });
+settingsBtn?.addEventListener('click', openPanel);
+$('panelclose')?.addEventListener('click', closePanel);
+panelEl?.addEventListener('click', (event) => {
+  if (event.target === panelEl) closePanel();
+});
 
-document.getElementById('keysave')?.addEventListener('click', () => {
-  const value = (keyInputEl?.value || '').trim();
-  if (value.length < 20) {
-    if (keyStateEl) keyStateEl.textContent = 'That does not look like a key — it is too short.';
+$('memadd')?.addEventListener('click', async () => {
+  const text = prompt('Something she should remember about you?');
+  if (text && (await memory.addFact(text, 'manual'))) {
+    renderFacts();
+    setStatus('Saved to her memory.');
+  }
+});
+
+$('memclear')?.addEventListener('click', async () => {
+  if (memory.facts.length && confirm('Forget everything she remembers about you?')) {
+    await memory.clearFacts();
+    renderFacts();
+  }
+});
+
+$('loadmodel')?.addEventListener('click', async () => {
+  const modelId = $('modelselect')?.value || LOCAL_MODELS[0].id;
+  writeBrainPrefs({ model: modelId, auto: true });
+  try {
+    await loadLocalBrain(modelId);
+    setStatus('Her local brain is ready. Ask her anything.');
+  } catch (err) {
+    showError(`Her local brain could not start: ${String(err.message || err)}`);
+  }
+  updatePanel();
+});
+
+$('voice-retry')?.addEventListener('click', async () => {
+  setPanelNote('voice', 'Rebuilding her voice…');
+  try {
+    await voice.reload();
+    voiceNote = '';
+    setPanelNote('voice', 'Her neural voice is ready.');
+  } catch (err) {
+    setPanelNote('voice', `Could not rebuild her voice: ${String(err.message || err)}`);
+  }
+});
+
+$('voice-demo')?.addEventListener('click', async () => {
+  const ok = await voice.unlock();
+  if (!ok) {
+    setPanelNote('voice', 'The browser blocked audio until you tap the page.');
     return;
   }
-  try { localStorage.setItem(KEY_STORE, value); } catch { /* private mode */ }
-  if (keyInputEl) keyInputEl.value = '';
-  showKeyState();
-  setStatus('Key saved. Say hi to her.');
+  const run = ++runToken;
+  bridge?.cancel();
+  voice.stop();
+  avatar.endSpeech();
+  await voice.speak('Hi. I’m Riko. This is what I sound like when it’s only me talking.', run);
+  if (run === runToken) {
+    avatar.endSpeech();
+    setState('idle');
+  }
 });
 
-document.getElementById('memadd')?.addEventListener('click', () => {
-  const text = prompt('Something she should remember about you?');
-  if (text && addMemory(text, 'manual')) setStatus('Saved to her memory.');
-});
+/* ── brain prefs ── */
 
-document.getElementById('memclear')?.addEventListener('click', () => {
-  if (memories.length && confirm('Forget everything she remembers about you?')) clearMemories();
-});
-
-loadMemories();
-loadHistory();
-showKeyState();
-
-/* ── Boot finishes here ── */
-setState('ready');
-// Start once the first frame has been drawn, or on a timer if frames are paused.
-let bootStarted = false;
-
-async function beginBoot() {
-  if (bootStarted) return;
-  bootStarted = true;
-
-  bootStatus('Initializing Riko…');
-  loadMemories();
-
-  await prepareBrain();
-
-  startVoice(); // downloads and prepares her voice while the screen is still up
+const BRAIN_PREFS = 'riko.brain.v1';
+function readBrainPrefs() {
+  try {
+    return JSON.parse(localStorage.getItem(BRAIN_PREFS) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+function writeBrainPrefs(patch) {
+  try {
+    localStorage.setItem(BRAIN_PREFS, JSON.stringify({ ...readBrainPrefs(), ...patch }));
+  } catch {
+    /* storage blocked */
+  }
 }
 
-requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(beginBoot, 250)));
-setTimeout(() => beginBoot(), 1200);
+async function loadLocalBrain(modelId) {
+  brainNote = 'Downloading her local model…';
+  updatePanel();
+  noteStatus('Downloading her local brain in the background — you can talk to her meanwhile.');
+  const bar = $('brainbar');
+  if (bar) bar.hidden = false;
+  await local.load(modelId, {
+    onStatus: (text) => setPanelNote('brain', text),
+  });
+  updateBrainProgress(1, `Local model ready: ${modelId}`);
+  brainNote = '';
+  noteStatus('Her local brain is ready.');
+  updatePanel();
+}
 
-if (!SR) {
+function maybeWarmBrain() {
+  const prefs = readBrainPrefs();
+  if (gpuSupport && !gpuSupport.webgpu) {
+    brainNote = 'No WebGPU in this browser, so her offline replies are used.';
+    updatePanel();
+    return;
+  }
+  if (prefs.auto === false) {
+    updatePanel();
+    return;
+  }
+  // Respect a metered or very small device; those users can load it from the panel.
+  const connection = navigator.connection || {};
+  const lowMemory = (navigator.deviceMemory || 8) < 4;
+  if (connection.saveData || lowMemory) {
+    brainNote = 'Automatic download skipped (data saver or low memory). Load her brain from ⚙ when you want.';
+    updatePanel();
+    return;
+  }
+  const modelId = prefs.model || LOCAL_MODELS[0].id;
+  loadLocalBrain(modelId).catch((err) => {
+    console.warn('[brain] local model unavailable', err);
+    brainNote = `Local model unavailable: ${String(err.message || err)}`;
+    const bar = $('brainbar');
+    if (bar) bar.hidden = true;
+    noteStatus('Her local brain did not download — using her small offline brain. You can retry in ⚙.');
+    updatePanel();
+  });
+}
+
+/* ── go ── */
+
+updatePanel();
+requestAnimationFrame(frame);
+bootSequence().catch((err) => {
+  console.error('[boot]', err);
+  bootStatus('Riko could not start.');
+  if (bootSkipEl) bootSkipEl.hidden = false;
+});
+
+if (!Ears.supported) {
   setStatus('This browser has no speech recognition — type to her instead.');
 } else if (inFrame) {
   offerOwnTab('Her microphone needs her own tab — open her here and the mic will work.');
 }
+
+// Expose a tiny read-only view for debugging in the console.
+window.riko = {
+  get state() {
+    return state;
+  },
+  get voiceMode() {
+    return voice.mode;
+  },
+  get brainReady() {
+    return local.ready;
+  },
+  get avatarInfo() {
+    return avatarInfo;
+  },
+  get mouth() {
+    return avatar.getMouthShape();
+  },
+  get mouthDebug() {
+    return avatar.getMouthDebug();
+  },
+  get emotion() {
+    return { ...avatar.emotion };
+  },
+  get facts() {
+    return memory.facts.map((f) => f.text);
+  },
+  get turns() {
+    return memory.turns.length;
+  },
+  get level() {
+    return voice.getLevel();
+  },
+  get gestureCount() {
+    return avatar.gestures.length;
+  },
+  get speechPlan() {
+    return avatar.plan.length;
+  },
+  get avatar() {
+    return avatar;
+  },
+};
