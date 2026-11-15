@@ -3,11 +3,11 @@
 // Nothing in here marks her as "speaking" on its own. The voice engine reports
 // playback start, and only then does the UI and the avatar switch to speaking.
 
-import { Avatar } from './avatar.js?v=27';
-import { Voice } from './voice.js?v=27';
-import { Ears } from './ears.js?v=27';
-import { Memory } from './memory.js?v=27';
-import { LocalBrain, LOCAL_MODELS, buildMessages, reflexReply, extractFacts } from './brain.js?v=27';
+import { Avatar } from './avatar.js?v=28';
+import { Voice } from './voice.js?v=28';
+import { Ears } from './ears.js?v=28';
+import { Memory } from './memory.js?v=28';
+import { LocalBrain, LOCAL_MODELS, buildMessages, reflexReply, extractFacts } from './brain.js?v=28';
 
 const $ = (id) => document.getElementById(id);
 
@@ -54,6 +54,7 @@ const voice = new Voice({
     // Real audio started. This is the only place speaking becomes true.
     if (state !== 'error') setState('speaking');
     speakingSince = performance.now();
+    lastProgressAt = performance.now();
   },
   onClause: (text, duration) => avatar.beginClause(text, duration),
   onIdle: () => {},
@@ -68,6 +69,7 @@ const voice = new Voice({
     voiceNote = report.message;
     if (report.kind === 'device-voice') noteStatus('Her neural voice is unavailable — using the device voice.');
     else if (report.kind === 'no-voice') noteStatus('No speech output is available here. Her words are on screen.');
+    else if (report.kind === 'audio-blocked') noteStatus('Your browser is holding the audio back — tap the page once and she can speak.');
     updatePanel();
   },
 });
@@ -269,6 +271,9 @@ bootRetryEl?.addEventListener('click', async () => {
 
 const clock = { last: performance.now() };
 let lastLowLevel = 0;
+// Any sign of progress (a token, a clause, real audio) resets this clock, so a
+// stall can be told apart from a slow answer.
+let lastProgressAt = performance.now();
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -297,6 +302,18 @@ function frame(now) {
     }
   } else {
     lastLowLevel = 0;
+  }
+
+  // Nothing may sit in thinking forever: a hung model, a blocked audio context
+  // or a dead network all end here instead of spinning indefinitely.
+  if (state === 'thinking' && now - lastProgressAt > 45000) {
+    lastProgressAt = now;
+    bridge?.cancel();
+    bridge = null;
+    abortController?.abort();
+    avatar.endSpeech();
+    setState('idle');
+    setStatus('That answer took too long, so I stopped waiting on it. Ask me again?');
   }
 }
 
@@ -337,12 +354,17 @@ class SpeechBridge {
     try {
       while (this.queue.length && !this.cancelled) {
         const sentence = this.queue.shift();
-        await voice.speak(sentence, this.run);
+        // One failed sentence must not strand the queue or leave the UI waiting.
+        try {
+          await voice.speak(sentence, this.run);
+        } catch (err) {
+          console.warn('[voice] sentence failed', err);
+        }
       }
     } finally {
       this.running = false;
+      this.#settle();
     }
-    this.#settle();
   }
 
   #settle() {
@@ -402,6 +424,7 @@ async function handleUser(raw) {
   if (text === lastUserText && Date.now() - lastUserAt < 6000) return;
   lastUserText = text;
   lastUserAt = Date.now();
+  lastProgressAt = performance.now();
 
   ears.cancel();
   abortController?.abort();
@@ -434,6 +457,7 @@ async function handleUser(raw) {
       if (run !== runToken) return;
       full += piece;
       buffer += piece;
+      lastProgressAt = performance.now();
       showLine('Riko', full.trim());
 
       let sentence;
@@ -765,9 +789,20 @@ $('voice-retry')?.addEventListener('click', async () => {
 });
 
 $('voice-demo')?.addEventListener('click', async () => {
-  const ok = await voice.unlock();
+  let ok = await voice.unlock();
   if (!ok) {
-    setPanelNote('voice', 'The browser blocked audio until you tap the page.');
+    // A second attempt inside the same gesture catches contexts that report
+    // their old state for a tick after the first resume.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    ok = await voice.unlock();
+  }
+  if (!ok) {
+    if (inFrame) {
+      offerOwnTab('Her page is inside another page, which mutes it. Open her in her own tab and try again.');
+      setPanelNote('voice', 'This page is framed by another page, and browsers mute audio in frames. Open her own tab, then try again.');
+    } else {
+      setPanelNote('voice', 'Tap anywhere on the page once, then press “Hear a sample” again.');
+    }
     return;
   }
   const run = ++runToken;
