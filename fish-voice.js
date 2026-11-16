@@ -35,9 +35,10 @@ export class FishVoice {
     this.source = null;
     this.controller = null;
     this.playedAt = 0;
+    this.failures = 0;
   }
 
-  /* ── audio context ── */
+  /* audio context */
 
   ensureContext() {
     if (this.context) return this.context;
@@ -84,7 +85,7 @@ export class FishVoice {
     return this.ready;
   }
 
-  /* ── level for lip-sync ── */
+  /* level for lip-sync */
 
   getLevel() {
     if (!this.analyser || !this.speaking) return 0;
@@ -101,7 +102,7 @@ export class FishVoice {
     return this.speaking && performance.now() - this.playedAt > 120;
   }
 
-  /* ── speech ── */
+  /* speech */
 
   async speak(text, token = ++this.token) {
     const clean = String(text || '').trim();
@@ -114,7 +115,14 @@ export class FishVoice {
       if (token !== this.token) return;
       console.warn('[fish] sentence failed', err);
       this.speaking = false;
-      this.onStatus?.('Her voice stumbled on that sentence.');
+      // Two dead sentences in a row means the service, not the sentence, is the
+      // problem: stand down so the caller can use its own voice instead.
+      if (++this.failures >= 2) {
+        this.ready = false;
+        this.onStatus?.('Her voice service is not answering, so she is using the in-page voice.');
+      } else {
+        this.onStatus?.('Her voice stumbled on that sentence.');
+      }
     }
   }
 
@@ -146,6 +154,7 @@ export class FishVoice {
 
     const buffer = await ctx.decodeAudioData(bytes);
     if (token !== this.token) return;
+    this.failures = 0;
 
     // The clause starts when the audio actually starts, so her mouth and her
     // gestures stay tied to the sound rather than to the request.
@@ -156,18 +165,13 @@ export class FishVoice {
       source.buffer = buffer;
       source.connect(this.analyser);
       this.source = source;
-      let started = false;
       source.onended = () => {
         if (this.source === source) this.source = null;
         resolve();
       };
       source.start();
-      started = true;
-      if (started) {
-        this.playedAt = performance.now();
-        this.onStart?.();
-      }
-      // A stop() call resolves the promise through onended as well.
+      this.playedAt = performance.now();
+      this.onStart?.();
     });
 
     if (token === this.token) {
