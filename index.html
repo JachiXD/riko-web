@@ -3,170 +3,433 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0c0a13">
   <title>Riko</title>
   <link rel="icon" href="data:,">
   <style>
-    :root { --ink: #1b1b22; --chip: rgba(22, 22, 30, .84); --accent: #ff4d8d; }
+    /* ── palette ──────────────────────────────────────────────────────────
+       Deep charcoal and near-black, muted lavender, a little pink. No neon:
+       everything sits low and calm so her face stays the brightest thing. */
+    :root {
+      --ink: #f1ecfb;
+      --ink-soft: rgba(233, 226, 250, .62);
+      --ink-faint: rgba(233, 226, 250, .38);
+      --bg-deep: #08070d;
+      --bg: #0c0a13;
+      --panel: rgba(24, 20, 36, .66);
+      --panel-solid: #14111e;
+      --lavender: #b9a7ff;
+      --lavender-soft: rgba(185, 167, 255, .16);
+      --pink: #ff9ecb;
+      --pink-soft: rgba(255, 158, 203, .14);
+      --stroke: rgba(255, 255, 255, .085);
+      --stroke-strong: rgba(255, 255, 255, .16);
+      --shadow-lg: 0 26px 60px rgba(4, 3, 8, .58);
+      --shadow-sm: 0 10px 26px rgba(4, 3, 8, .4);
+      --ease: cubic-bezier(.22, .61, .36, 1);
+      --font: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
     * { box-sizing: border-box; }
     html, body {
-      margin: 0; height: 100%; overflow: hidden; background: #fff; color: var(--ink);
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      margin: 0; height: 100%; overflow: hidden;
+      background: radial-gradient(120% 90% at 50% 20%, #16121f 0%, #0c0a13 52%, #08070d 100%);
+      color: var(--ink);
+      font-family: var(--font);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
       -webkit-tap-highlight-color: transparent;
     }
-    #scene { position: fixed; inset: 0; }
+    button, input, select, a { font-family: inherit; }
+    :focus-visible { outline: 2px solid rgba(185, 167, 255, .85); outline-offset: 3px; }
+
+    /* ── stage ────────────────────────────────────────────────────────── */
+    #scene { position: fixed; inset: 0; z-index: 0; }
     #scene canvas { display: block; }
 
-    #hud {
-      position: fixed; left: 0; right: 0; bottom: 0;
-      padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
-      display: flex; flex-direction: column; align-items: center; gap: 12px;
+    /* Atmospheric grade over her white backdrop: a bright, cool centre that
+       keeps her skin and hair true, falling away into charcoal and lavender,
+       with a dark base for the controls to sit on. */
+    #atmosphere {
+      position: fixed; inset: 0; z-index: 1; pointer-events: none;
+      mix-blend-mode: multiply;
+      background:
+        radial-gradient(74% 60% at 50% 32%,
+          rgba(255, 255, 255, 1) 0%,
+          rgba(250, 246, 255, .98) 30%,
+          rgba(219, 204, 252, .92) 56%,
+          rgba(126, 102, 178, .96) 80%,
+          rgba(30, 24, 42, 1) 100%),
+        linear-gradient(to top,
+          rgba(10, 8, 16, 1) 0%,
+          rgba(10, 8, 16, .82) 12%,
+          rgba(10, 8, 16, .28) 24%,
+          rgba(10, 8, 16, 0) 40%);
+    }
+    /* Two barely-there coloured lights, screen-blended, so the top of the
+       frame has depth without turning into a gradient soup. */
+    #glow {
+      position: fixed; inset: 0; z-index: 2; pointer-events: none;
+      mix-blend-mode: screen;
+      background:
+        radial-gradient(42% 34% at 76% 10%, rgba(255, 138, 190, .16), rgba(255, 138, 190, 0) 70%),
+        radial-gradient(38% 30% at 16% 6%, rgba(160, 136, 255, .18), rgba(160, 136, 255, 0) 72%);
+    }
+
+    /* ── top bar ──────────────────────────────────────────────────────── */
+    #topbar {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 3;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: calc(16px + env(safe-area-inset-top)) clamp(16px, 3.4vw, 34px) 0;
       pointer-events: none;
     }
+    .brand {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 7px 14px 7px 11px; border-radius: 999px;
+      background: rgba(14, 11, 21, .42);
+      border: 1px solid rgba(255, 255, 255, .07);
+      backdrop-filter: blur(14px) saturate(130%);
+      -webkit-backdrop-filter: blur(14px) saturate(130%);
+      box-shadow: 0 8px 24px rgba(4, 3, 8, .32);
+    }
+    .brand-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: linear-gradient(140deg, var(--lavender), var(--pink));
+      box-shadow: 0 0 0 3px rgba(185, 167, 255, .12), 0 0 12px rgba(185, 167, 255, .55);
+    }
+    .brand-name {
+      font-size: 12.5px; font-weight: 600; letter-spacing: .24em;
+      text-transform: uppercase; color: #efe9fb;
+    }
+    .brand-sub {
+      font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+
+    /* ── hud ──────────────────────────────────────────────────────────── */
+    #hud {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 3;
+      padding: 0 clamp(14px, 3.4vw, 34px) calc(16px + env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; align-items: center; gap: 11px;
+      pointer-events: none;
+    }
+
+    /* Her line of dialogue: a light glass card, kept low and to one side on
+       wide screens so it never sits over her face. */
     #line {
-      max-width: min(660px, 94vw);
-      background: var(--chip); color: #fff; backdrop-filter: blur(10px);
-      padding: 11px 16px; border-radius: 16px; font-size: 15px; line-height: 1.45;
-      opacity: 0; transform: translateY(6px); transition: opacity .22s, transform .22s;
-      box-shadow: 0 6px 24px rgba(0, 0, 0, .14);
+      width: 100%; max-width: min(480px, 92vw);
+      max-height: 30vh; overflow-y: auto; overscroll-behavior: contain;
+      background: linear-gradient(150deg, rgba(30, 25, 44, .78), rgba(18, 15, 27, .72));
+      border: 1px solid var(--stroke);
+      border-radius: 18px;
+      padding: 13px 17px 14px;
+      color: var(--ink);
+      font-size: 14.5px; line-height: 1.6; letter-spacing: .002em;
+      backdrop-filter: blur(22px) saturate(140%);
+      -webkit-backdrop-filter: blur(22px) saturate(140%);
+      box-shadow: var(--shadow-lg), inset 0 1px 0 rgba(255, 255, 255, .05);
+      opacity: 0; transform: translateY(8px) scale(.995);
+      transition: opacity .3s var(--ease), transform .3s var(--ease);
+      scrollbar-width: thin; scrollbar-color: rgba(185, 167, 255, .35) transparent;
+      pointer-events: auto;
     }
     #line.show { opacity: 1; transform: none; }
+    #line::-webkit-scrollbar { width: 6px; }
+    #line::-webkit-scrollbar-thumb { background: rgba(185, 167, 255, .3); border-radius: 999px; }
     #who {
-      display: block; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
-      opacity: .58; margin-bottom: 3px;
+      display: flex; align-items: center; gap: 7px;
+      font-size: 10px; font-weight: 600; letter-spacing: .2em; text-transform: uppercase;
+      color: var(--lavender); opacity: .9; margin-bottom: 5px;
     }
+    #who::before {
+      content: ""; width: 5px; height: 5px; border-radius: 50%;
+      background: var(--pink); box-shadow: 0 0 9px rgba(255, 158, 203, .8);
+    }
+    #text { display: block; }
 
-    #bar { display: flex; align-items: center; gap: 10px; pointer-events: auto; flex-wrap: wrap; justify-content: center; }
+    /* ── controls ─────────────────────────────────────────────────────── */
+    #bar {
+      display: flex; align-items: center; justify-content: center; gap: 9px;
+      flex-wrap: wrap; pointer-events: auto;
+    }
     button {
       font: inherit; cursor: pointer; border: 0; border-radius: 999px;
-      padding: 13px 22px; font-weight: 550; transition: transform .12s, filter .12s, background .12s;
+      transition: transform .16s var(--ease), background .16s var(--ease),
+                  box-shadow .2s var(--ease), filter .16s var(--ease), color .16s var(--ease);
     }
-    button:active { transform: scale(.97); }
+    button:active { transform: scale(.975); }
+
     #mic {
-      background: var(--accent); color: #fff; font-size: 16px;
-      box-shadow: 0 8px 22px rgba(255, 77, 141, .32);
-      min-width: 190px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      min-width: 172px; padding: 13px 24px;
+      font-size: 14.5px; font-weight: 600; letter-spacing: .01em;
+      color: #17111f;
+      background: linear-gradient(135deg, #cdbcf8 0%, #e2b6e6 48%, #ffb2cf 100%);
+      box-shadow: 0 12px 30px rgba(164, 133, 232, .26), inset 0 1px 0 rgba(255, 255, 255, .55);
     }
-    #mic:hover { filter: brightness(1.05); }
-    #mic.listening { background: #e0356f; animation: pulse 1.4s ease-in-out infinite; }
-    #mic.thinking { background: #6b7280; box-shadow: none; }
-    @keyframes pulse {
-      0%, 100% { box-shadow: 0 0 0 0 rgba(255, 77, 141, .45); }
-      50% { box-shadow: 0 0 0 14px rgba(255, 77, 141, 0); }
+    #mic:hover { filter: brightness(1.05); transform: translateY(-1px); }
+    #mic.listening {
+      background: linear-gradient(135deg, #e7c2f6, #ffb6d3);
+      animation: breathe 2.2s ease-in-out infinite;
     }
-    #kb {
-      background: #f1f1f5; color: #444; padding: 13px 16px; font-size: 16px;
+    #mic.thinking {
+      color: #ddd6ee;
+      background: linear-gradient(135deg, rgba(74, 64, 96, .92), rgba(52, 46, 70, .92));
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .08), 0 10px 26px rgba(4, 3, 8, .4);
+      cursor: default;
     }
-    #newtab {
-      background: #f1f1f5; color: #444; padding: 13px 18px; font-size: 14px;
-      border-radius: 999px; font-weight: 550; text-decoration: none;
+    @keyframes breathe {
+      0%, 100% { box-shadow: 0 12px 30px rgba(164, 133, 232, .22), 0 0 0 0 rgba(255, 158, 203, .28); }
+      50% { box-shadow: 0 12px 30px rgba(164, 133, 232, .3), 0 0 0 9px rgba(255, 158, 203, 0); }
     }
-    #newtab:hover { background: #e9e9f0; }
-    #newtab[hidden] { display: none; }
-    #unmute {
-      background: #fff; color: #333; border: 1px solid #e2e2ea; padding: 13px 18px;
-      font-size: 14px;
-    }
-    #unmute:hover { border-color: #c9c9d6; }
-    #unmute[hidden] { display: none; }
-    #status { color: #73737f; font-size: 12.5px; text-align: center; }
 
-    #typeform { display: flex; gap: 8px; pointer-events: auto; width: min(520px, 94vw); }
+    /* Secondary controls: small glass circles, quiet until you need them. */
+    #kb, #settings {
+      width: 44px; height: 44px; padding: 0;
+      display: inline-grid; place-items: center;
+      font-size: 15px; line-height: 1;
+      color: var(--ink-soft);
+      background: rgba(22, 18, 32, .6);
+      border: 1px solid var(--stroke);
+      backdrop-filter: blur(16px) saturate(130%);
+      -webkit-backdrop-filter: blur(16px) saturate(130%);
+      box-shadow: var(--shadow-sm);
+    }
+    #kb:hover, #settings:hover {
+      color: #f4efff; background: rgba(38, 31, 55, .78);
+      border-color: var(--stroke-strong); transform: translateY(-1px);
+    }
+
+    #unmute, #newtab {
+      padding: 11px 18px; font-size: 13px; font-weight: 550;
+      color: #f3eefd;
+      background: rgba(30, 25, 44, .72);
+      border: 1px solid var(--stroke);
+      backdrop-filter: blur(16px) saturate(130%);
+      -webkit-backdrop-filter: blur(16px) saturate(130%);
+      box-shadow: var(--shadow-sm);
+      text-decoration: none;
+    }
+    #unmute:hover, #newtab:hover { background: rgba(46, 38, 66, .85); border-color: var(--stroke-strong); }
+    #unmute[hidden], #newtab[hidden] { display: none; }
+
+    /* ── message input ────────────────────────────────────────────────── */
+    #typeform {
+      display: flex; align-items: center; gap: 8px;
+      width: min(520px, 92vw); pointer-events: auto;
+      padding: 6px 6px 6px 4px;
+      background: rgba(20, 16, 30, .68);
+      border: 1px solid var(--stroke);
+      border-radius: 999px;
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      box-shadow: var(--shadow-lg);
+      transition: border-color .2s var(--ease), box-shadow .2s var(--ease);
+    }
     #typeform[hidden] { display: none; }
-    #typed {
-      flex: 1; font: inherit; font-size: 15px; padding: 12px 14px; border-radius: 999px;
-      border: 1px solid #dcdce4; background: #fff; outline: none;
+    #typeform:focus-within {
+      border-color: rgba(185, 167, 255, .4);
+      box-shadow: var(--shadow-lg), 0 0 0 3px rgba(185, 167, 255, .1);
     }
-    #typed:focus { border-color: #b9b9c8; }
-    #typeform button { background: #1b1b22; color: #fff; }
+    #typed {
+      flex: 1; min-width: 0;
+      font: inherit; font-size: 14.5px; color: var(--ink);
+      padding: 11px 16px; border-radius: 999px;
+      border: 0; background: transparent; outline: none;
+    }
+    #typed::placeholder { color: var(--ink-faint); }
+    #typeform button {
+      padding: 11px 20px; font-size: 13.5px; font-weight: 600; color: #17111f;
+      background: linear-gradient(135deg, #cdbcf8, #ffb2cf);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5);
+    }
+    #typeform button:hover { filter: brightness(1.05); }
 
+    #status {
+      font-size: 11.5px; letter-spacing: .015em; text-align: center;
+      color: var(--ink-faint);
+      max-width: min(560px, 90vw);
+      transition: color .3s var(--ease);
+    }
+
+    /* ── boot ─────────────────────────────────────────────────────────── */
     #boot {
-      position: fixed; inset: 0; display: grid; place-items: center; background: #fff;
-      font-size: 15px; color: #6b6b76; transition: opacity .45s; z-index: 5;
+      position: fixed; inset: 0; z-index: 5; display: grid; place-items: center;
+      background: radial-gradient(90% 70% at 50% 32%, #191426 0%, #0c0a13 58%, #08070d 100%);
+      color: var(--ink);
+      transition: opacity .55s var(--ease);
     }
     #boot.gone { opacity: 0; pointer-events: none; }
-    #boot small { display: block; margin-top: 8px; font-size: 12.5px; color: #a0a0ab; }
-    .bootcard { width: min(360px, 84vw); text-align: center; }
+    .bootcard { width: min(340px, 82vw); text-align: center; }
+    .bootmark {
+      width: 46px; height: 46px; margin: 0 auto 18px; border-radius: 50%;
+      background: linear-gradient(140deg, rgba(185, 167, 255, .9), rgba(255, 158, 203, .85));
+      box-shadow: 0 0 0 6px rgba(185, 167, 255, .08), 0 0 34px rgba(185, 167, 255, .3);
+      animation: breathe 3s ease-in-out infinite;
+    }
+    #boot .boottitle { font-size: 14.5px; font-weight: 500; letter-spacing: .01em; }
+    #boot small {
+      display: block; margin-top: 7px; font-size: 12px; color: var(--ink-faint);
+      letter-spacing: .02em;
+    }
     #bootmsg {
-      margin-top: 18px; font-size: 12.5px; color: #8b8b97; min-height: 18px;
-      transition: opacity .3s;
+      margin-top: 20px; font-size: 12px; color: var(--ink-soft); min-height: 17px;
+      transition: opacity .3s var(--ease);
     }
     #bootbar {
-      margin-top: 12px; height: 4px; border-radius: 999px; background: #eeeef4; overflow: hidden;
+      margin-top: 12px; height: 3px; border-radius: 999px; overflow: hidden;
+      background: rgba(255, 255, 255, .07);
     }
     #bootbar[hidden] { display: none; }
     #bootfill {
       display: block; height: 100%; width: 0%; border-radius: 999px;
-      background: linear-gradient(90deg, #ff4d8d, #ff8fb4); transition: width .35s ease;
+      background: linear-gradient(90deg, var(--lavender), var(--pink));
+      transition: width .4s var(--ease);
     }
     #bootretry, #bootskip {
-      margin-top: 18px; font: inherit; font-size: 13px; cursor: pointer;
-      padding: 10px 18px; border-radius: 999px; border: 1px solid #e2e2ea;
-      background: #fff; color: #444;
+      margin-top: 18px; padding: 10px 18px; font-size: 12.5px; font-weight: 550;
+      color: var(--ink); background: rgba(255, 255, 255, .05);
+      border: 1px solid var(--stroke); border-radius: 999px;
     }
-    #bootretry:hover, #bootskip:hover { border-color: #c9c9d6; }
+    #bootretry:hover, #bootskip:hover { background: rgba(255, 255, 255, .09); border-color: var(--stroke-strong); }
     #bootretry[hidden], #bootskip[hidden] { display: none; }
     .bootrow { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
-    #settings {
-      background: #f1f1f5; color: #444; padding: 13px 16px; font-size: 16px;
-    }
-    #settings:hover { background: #e9e9f0; }
 
+    /* ── settings panel ───────────────────────────────────────────────── */
     #panel {
       position: fixed; inset: 0; z-index: 6; display: none; place-items: center;
-      background: rgba(20, 20, 28, .42); backdrop-filter: blur(6px); padding: 18px;
+      padding: 18px;
+      background: rgba(6, 5, 10, .66);
+      backdrop-filter: blur(10px) saturate(120%);
+      -webkit-backdrop-filter: blur(10px) saturate(120%);
     }
-    #panel.open { display: grid; }
+    #panel.open { display: grid; animation: fadeIn .22s var(--ease); }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     .card {
-      background: #fff; border-radius: 20px; width: min(520px, 100%);
-      max-height: min(84vh, 680px); display: flex; flex-direction: column; overflow: hidden;
-      box-shadow: 0 24px 60px rgba(0, 0, 0, .24);
+      width: min(500px, 100%); max-height: min(84vh, 660px);
+      display: flex; flex-direction: column; overflow: hidden;
+      background: linear-gradient(160deg, #181325 0%, #120f1c 62%, #0f0c17 100%);
+      border: 1px solid var(--stroke);
+      border-radius: 22px;
+      box-shadow: 0 34px 80px rgba(3, 2, 6, .68), inset 0 1px 0 rgba(255, 255, 255, .05);
+      animation: rise .26s var(--ease);
     }
+    @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.99); } to { opacity: 1; transform: none; } }
     .card header {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 16px 18px 8px;
+      padding: 18px 20px 10px;
     }
-    .card h2 { margin: 0; font-size: 16px; }
+    .card h2 {
+      margin: 0; font-size: 14.5px; font-weight: 600; letter-spacing: .01em;
+      color: #f4efff;
+    }
     .card h3 {
-      margin: 16px 0 8px; font-size: 11.5px; letter-spacing: .09em;
-      text-transform: uppercase; color: #8b8b97; font-weight: 600;
+      margin: 18px 0 8px; font-size: 10.5px; font-weight: 600;
+      letter-spacing: .18em; text-transform: uppercase;
+      color: var(--lavender); opacity: .82;
     }
-    .card .body { overflow: auto; padding: 0 18px 18px; }
+    .card .body {
+      overflow-y: auto; overscroll-behavior: contain; padding: 0 20px 20px;
+      scrollbar-width: thin; scrollbar-color: rgba(185, 167, 255, .28) transparent;
+    }
+    .card .body::-webkit-scrollbar { width: 6px; }
+    .card .body::-webkit-scrollbar-thumb { background: rgba(185, 167, 255, .26); border-radius: 999px; }
     .icon {
-      background: transparent; color: #8b8b97; padding: 4px 8px; font-size: 15px;
+      padding: 5px 9px; font-size: 14px; color: var(--ink-faint);
+      background: transparent; border-radius: 9px;
     }
-    .icon:hover { color: #444; }
-    .hint { font-size: 12px; color: #8b8b97; margin: 8px 0 0; line-height: 1.5; }
-    .btn { background: #1b1b22; color: #fff; padding: 10px 16px; font-size: 13.5px; }
-    .btn.ghost { background: #f1f1f5; color: #444; }
-    .btn.danger { background: #fff; color: #c02b5a; border: 1px solid #f0d3de; }
-    .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; align-items: center; }
+    .icon:hover { color: var(--ink); background: rgba(255, 255, 255, .06); }
+    .hint { margin: 9px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--ink-soft); }
+    .btn {
+      padding: 10px 16px; font-size: 13px; font-weight: 600; color: #17111f;
+      background: linear-gradient(135deg, #cdbcf8, #e4b9e2);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45);
+    }
+    .btn:hover { filter: brightness(1.06); }
+    .btn.ghost {
+      color: var(--ink); background: rgba(255, 255, 255, .055);
+      border: 1px solid var(--stroke); box-shadow: none;
+    }
+    .btn.ghost:hover { background: rgba(255, 255, 255, .1); border-color: var(--stroke-strong); }
+    .btn.danger {
+      color: #ffb3cc; background: transparent;
+      border: 1px solid rgba(255, 158, 203, .28);
+    }
+    .btn.danger:hover { background: rgba(255, 158, 203, .1); }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
     select {
-      flex: 1; min-width: 180px; font: inherit; font-size: 13px;
-      padding: 10px 12px; border-radius: 10px; border: 1px solid #dcdce4;
-      background: #fff; color: #444; outline: none;
+      flex: 1; min-width: 168px; font-size: 13px; color: var(--ink);
+      padding: 10px 12px; border-radius: 11px;
+      border: 1px solid var(--stroke); background: rgba(255, 255, 255, .045);
+      outline: none; appearance: none;
     }
-    select:focus { border-color: #b9b9c8; }
+    select:focus { border-color: rgba(185, 167, 255, .5); }
     #brainbar {
-      margin-top: 10px; height: 4px; border-radius: 999px; background: #eeeef4; overflow: hidden;
+      margin-top: 10px; height: 3px; border-radius: 999px; overflow: hidden;
+      background: rgba(255, 255, 255, .07);
     }
     #brainbar[hidden] { display: none; }
     #brainfill {
       display: block; height: 100%; width: 0%; border-radius: 999px;
-      background: linear-gradient(90deg, #ff4d8d, #ff8fb4); transition: width .3s ease;
+      background: linear-gradient(90deg, var(--lavender), var(--pink));
+      transition: width .32s var(--ease);
     }
-    #memlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    #memlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
     #memlist li {
-      display: flex; align-items: flex-start; gap: 6px; background: #f7f7fa;
-      border-radius: 12px; padding: 9px 10px; font-size: 14px; line-height: 1.45;
+      display: flex; align-items: flex-start; gap: 7px;
+      padding: 10px 11px; border-radius: 12px; font-size: 13.5px; line-height: 1.5;
+      color: var(--ink); background: rgba(255, 255, 255, .045);
+      border: 1px solid rgba(255, 255, 255, .05);
     }
     #memlist li span { flex: 1; }
     #memlist input {
-      flex: 1; font: inherit; font-size: 14px; padding: 6px 8px;
-      border-radius: 8px; border: 1px solid #dcdce4; outline: none;
+      flex: 1; font-size: 13.5px; color: var(--ink);
+      padding: 6px 9px; border-radius: 9px;
+      border: 1px solid var(--stroke); background: rgba(10, 8, 16, .5); outline: none;
     }
-    #memempty { font-size: 13.5px; color: #8b8b97; margin: 0; }
+    #memempty { margin: 0; font-size: 13px; color: var(--ink-faint); }
 
-    @media (max-width: 480px) { #mic { font-size: 15px; padding: 12px 18px; min-width: 0; } }
+    /* ── responsive ───────────────────────────────────────────────────── */
+
+    /* Wide screens: the caption moves out of her centre line, to the left,
+       while the controls stay centred under her. */
+    @media (min-width: 901px) {
+      #hud { align-items: center; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+      #line {
+        align-self: flex-start;
+        width: min(430px, 38vw); max-width: 430px;
+        margin-left: clamp(4px, 2.5vw, 40px);
+        margin-bottom: 4px;
+        font-size: 14.5px;
+      }
+      #status { font-size: 12px; }
+    }
+
+    /* Tablets and small laptops: tighter margins, her face still clear. */
+    @media (max-width: 900px) {
+      #line { max-width: min(560px, 92vw); }
+      #mic { min-width: 160px; padding: 12px 20px; }
+    }
+
+    /* Phones: everything stacks, the card takes the width, controls shrink. */
+    @media (max-width: 560px) {
+      #topbar { padding-top: calc(12px + env(safe-area-inset-top)); }
+      .brand-sub { display: none; }
+      .brand { padding: 6px 12px 6px 10px; gap: 8px; }
+      #hud { gap: 9px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+      #line {
+        max-width: 100%; max-height: 26vh;
+        font-size: 14px; padding: 12px 14px 13px; border-radius: 16px;
+      }
+      #mic { min-width: 0; padding: 12px 18px; font-size: 14px; }
+      #kb, #settings { width: 42px; height: 42px; }
+      #typeform { width: 100%; }
+      #status { font-size: 11px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; }
+    }
   </style>
   <script type="importmap">
     {
@@ -180,26 +443,37 @@
 </head>
 <body>
   <div id="scene"></div>
+  <div id="atmosphere" aria-hidden="true"></div>
+  <div id="glow" aria-hidden="true"></div>
+
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-dot" aria-hidden="true"></span>
+      <span class="brand-name">Riko</span>
+      <span class="brand-sub">companion</span>
+    </div>
+  </header>
 
   <div id="hud">
     <div id="line"><span id="who"></span><span id="text"></span></div>
     <div id="bar">
       <button id="mic" type="button">🎙 Tap to talk</button>
-      <button id="kb" type="button" title="Type instead">⌨</button>
-      <button id="settings" type="button" title="Her voice, brain and memory">⚙</button>
+      <button id="kb" type="button" title="Type instead" aria-label="Type instead">⌨</button>
+      <button id="settings" type="button" title="Her voice, brain and memory" aria-label="Settings">⚙</button>
       <button id="unmute" type="button" hidden>🔊 Tap to hear her</button>
       <a id="newtab" href="./" target="_blank" rel="noopener noreferrer" hidden>↗ Open in a new tab</a>
     </div>
     <form id="typeform" hidden>
-      <input id="typed" placeholder="Type to Riko…" autocomplete="off">
+      <input id="typed" placeholder="Type to Riko…" autocomplete="off" aria-label="Message Riko">
       <button type="submit">Send</button>
     </form>
-    <div id="status">Press the mic and say hi.</div>
+    <div id="status" role="status" aria-live="polite">Press the mic and say hi.</div>
   </div>
 
   <div id="boot">
     <div class="bootcard">
-      <div>Waking Riko up…<small>her body, voice and brain load locally</small></div>
+      <div class="bootmark" aria-hidden="true"></div>
+      <div class="boottitle">Waking Riko up…<small>her body, voice and brain load locally</small></div>
       <div id="bootmsg">Initializing Riko…</div>
       <div id="bootbar" hidden><i id="bootfill"></i></div>
       <div class="bootrow">
@@ -213,7 +487,7 @@
     <div class="card" role="dialog" aria-modal="true" aria-label="Her voice, brain and memory">
       <header>
         <h2>Her voice, brain &amp; memory</h2>
-        <button id="panelclose" class="icon" type="button" title="Close">✕</button>
+        <button id="panelclose" class="icon" type="button" title="Close" aria-label="Close">✕</button>
       </header>
       <div class="body">
         <h3>Her voice</h3>
@@ -249,6 +523,6 @@
   </div>
 
   <!-- versioned so a browser can never keep serving an older build of her voice -->
-  <script type="module" src="./app.js?v=29"></script>
+  <script type="module" src="./app.js?v=30"></script>
 </body>
 </html>
