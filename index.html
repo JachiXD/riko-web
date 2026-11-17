@@ -54,17 +54,26 @@
       position: fixed; inset: 0; z-index: 1; pointer-events: none;
       mix-blend-mode: multiply;
       background:
-        radial-gradient(74% 60% at 50% 32%,
+        /* a soft key light on her, so her skin stays true while the room
+           around her falls away to near-black */
+        radial-gradient(32% 36% at 50% 33%,
           rgba(255, 255, 255, 1) 0%,
-          rgba(250, 246, 255, .98) 30%,
-          rgba(219, 204, 252, .92) 56%,
-          rgba(126, 102, 178, .96) 80%,
-          rgba(30, 24, 42, 1) 100%),
+          rgba(255, 255, 255, .99) 40%,
+          rgba(255, 255, 255, .8) 62%,
+          rgba(255, 255, 255, .34) 82%,
+          rgba(255, 255, 255, 0) 100%),
+        /* the room itself: muted lavender into charcoal */
+        radial-gradient(64% 64% at 50% 30%,
+          #977fbe 0%,
+          #4e3f68 38%,
+          #241d31 66%,
+          #0a0810 100%),
+        /* a dark floor for the controls to sit on */
         linear-gradient(to top,
-          rgba(10, 8, 16, 1) 0%,
-          rgba(10, 8, 16, .82) 12%,
-          rgba(10, 8, 16, .28) 24%,
-          rgba(10, 8, 16, 0) 40%);
+          #08060d 0%,
+          rgba(8, 6, 13, .92) 12%,
+          rgba(8, 6, 13, .45) 24%,
+          rgba(8, 6, 13, 0) 36%);
     }
     /* Two barely-there coloured lights, screen-blended, so the top of the
        frame has depth without turning into a gradient soup. */
@@ -361,7 +370,7 @@
       flex: 1; min-width: 168px; font-size: 13px; color: var(--ink);
       padding: 10px 12px; border-radius: 11px;
       border: 1px solid var(--stroke); background: rgba(255, 255, 255, .045);
-      outline: none; appearance: none;
+      outline: none;
     }
     select:focus { border-color: rgba(185, 167, 255, .5); }
     #brainbar {
