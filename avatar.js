@@ -7,7 +7,6 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 import { clamp, approach, emptyChannels } from './gestures.js?v=29';
@@ -124,24 +123,19 @@ export class Avatar {
     return this.info;
   }
 
+  // The camera is deliberately not user-driven: no orbit, no zoom, no pan. She
+  // used to be a full-body turntable, but her arms are the least convincing part
+  // of the rig, so the default framing is a locked portrait that keeps them out
+  // of shot. setFraming('full') restores the old full-body view for later.
   #frameCamera() {
     const vrm = this.vrm;
     vrm.scene.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(vrm.scene);
     const span = box.max.y - box.min.y;
     const height = span > 0.3 && span < 20 ? span : 1.6;
-    this.frame = { box, height, y: box.min.y + height * 0.7 };
+    this.frame = { box, height, top: box.max.y, y: box.min.y + height * 0.7 };
+    this.framing = this.framing || 'portrait';
     this.#placeCamera();
-
-    const controls = new OrbitControls(this.camera, this.renderer.domElement);
-    controls.target.set(0, this.frame.y, 0);
-    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
-    controls.minDistance = this.frame.distance * 0.3;
-    controls.maxDistance = this.frame.distance * 2.6;
-    controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
-    controls.enablePan = false;
-    this.controls = controls;
 
     addEventListener('resize', () => {
       this.camera.aspect = innerWidth / innerHeight;
@@ -151,16 +145,39 @@ export class Avatar {
     });
   }
 
+  /** 'portrait' (default, chest up) or 'full' (whole model, still locked). */
+  setFraming(mode) {
+    this.framing = mode === 'full' ? 'full' : 'portrait';
+    if (this.frame && this.camera) this.#placeCamera();
+  }
+
   #placeCamera() {
-    const { height, y } = this.frame;
+    const { height, top } = this.frame;
     const vFov = THREE.MathUtils.degToRad(this.camera.fov);
-    const distance = (height * 0.86) / 2 / Math.tan(vFov / 2);
+    const halfFov = Math.tan(vFov / 2);
+
+    // How much of her the frame covers, in fractions of her own height measured
+    // from the top of her head. Portrait cuts just below the chest, which keeps
+    // her hands out of shot without cropping her face.
+    const visible = height * (this.framing === 'full' ? 1.06 : 0.42);
+    const center = this.framing === 'full'
+      ? top - height * 0.5
+      : top - visible * 0.5 + height * 0.05;
+
+    // Fit vertically, then back off only if the viewport is narrow enough to
+    // clip her shoulders. The result is identical framing on any wide screen and
+    // the same composition, slightly wider, on a phone in portrait.
+    const distanceForHeight = visible / 2 / halfFov;
+    const aspect = this.camera.aspect || 1;
+    const shoulderWidth = height * 0.3;
+    const distanceForWidth = shoulderWidth / 2 / (halfFov * aspect);
+    const distance = Math.min(Math.max(distanceForHeight, distanceForWidth), distanceForHeight * 1.7);
+
     this.frame.distance = distance;
-    this.camera.position.set(0, y + height * 0.015, distance);
-    if (this.controls) {
-      this.controls.target.set(0, y, 0);
-      this.controls.update();
-    }
+    this.frame.centerY = center;
+    this.camera.position.set(0, center, distance);
+    this.camera.lookAt(0, center, 0);
+    this.camera.updateMatrixWorld();
   }
 
   #setupExpressions() {
@@ -177,7 +194,9 @@ export class Avatar {
     this.lookTarget = new THREE.Object3D();
     const head = this.vrm.humanoid.getNormalizedBoneNode('head');
     const y = head ? head.getWorldPosition(new THREE.Vector3()).y : this.frame.y + this.frame.height * 0.35;
-    this.lookTarget.position.set(0, y - 0.02, 1.4);
+    // Just in front of the lens, so she meets the viewer's eyes from where the
+    // camera actually sits rather than from the old full-body distance.
+    this.lookTarget.position.set(0, y - 0.02, (this.frame?.distance || 1.4) * 0.92);
     this.scene.add(this.lookTarget);
     this.vrm.lookAt.target = this.lookTarget;
     this.gazeY = y;
