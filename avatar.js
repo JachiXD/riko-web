@@ -171,7 +171,9 @@ export class Avatar {
     const aspect = this.camera.aspect || 1;
     const shoulderWidth = height * 0.3;
     const distanceForWidth = shoulderWidth / 2 / (halfFov * aspect);
-    const distance = Math.min(Math.max(distanceForHeight, distanceForWidth), distanceForHeight * 1.7);
+    // Only a little give on narrow screens: at full width-fit her shoulders fit
+    // but her forearms come back into shot, which defeats the framing.
+    const distance = Math.min(Math.max(distanceForHeight, distanceForWidth), distanceForHeight * 1.2);
 
     this.frame.distance = distance;
     this.frame.centerY = center;
