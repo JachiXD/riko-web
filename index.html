@@ -47,26 +47,32 @@
     #scene { position: fixed; inset: 0; z-index: 0; }
     #scene canvas { display: block; }
 
-    /* Atmospheric grade over her white backdrop: a bright, cool centre that
-       keeps her skin and hair true, falling away into charcoal and lavender,
-       with a dark base for the controls to sit on. */
+    /* Atmospheric grade over her white backdrop. Her hair and sweater are
+       near-black, so the lighting has to keep a lighter field behind her
+       silhouette at every brightness, or she disappears into the room. */
     #atmosphere {
       position: fixed; inset: 0; z-index: 1; pointer-events: none;
       mix-blend-mode: multiply;
       background:
+        /* a low backlight behind her body: her sweater is near-black, so it
+           needs a lighter backdrop to stay a silhouette rather than a gap */
+        radial-gradient(30% 26% at 50% 62%,
+          rgba(255, 255, 255, .62) 0%,
+          rgba(255, 255, 255, .4) 58%,
+          rgba(255, 255, 255, 0) 100%),
         /* a soft key light on her, so her skin stays true while the room
            around her falls away to near-black */
-        radial-gradient(32% 36% at 50% 33%,
+        radial-gradient(34% 46% at 50% 38%,
           rgba(255, 255, 255, 1) 0%,
-          rgba(255, 255, 255, .99) 40%,
-          rgba(255, 255, 255, .8) 62%,
-          rgba(255, 255, 255, .34) 82%,
+          rgba(255, 255, 255, .99) 34%,
+          rgba(255, 255, 255, .82) 58%,
+          rgba(255, 255, 255, .4) 80%,
           rgba(255, 255, 255, 0) 100%),
         /* the room itself: muted lavender into charcoal */
-        radial-gradient(64% 64% at 50% 30%,
-          #977fbe 0%,
-          #4e3f68 38%,
-          #241d31 66%,
+        radial-gradient(66% 66% at 50% 32%,
+          #a58cc9 0%,
+          #56456f 38%,
+          #271f36 66%,
           #0a0810 100%),
         /* a dark floor for the controls to sit on */
         linear-gradient(to top,
@@ -76,13 +82,14 @@
           rgba(8, 6, 13, 0) 36%);
     }
     /* Two barely-there coloured lights, screen-blended, so the top of the
-       frame has depth without turning into a gradient soup. */
+       frame has depth without turning into a gradient soup. They also pick
+       out the tips of her ears against the darkest corners. */
     #glow {
       position: fixed; inset: 0; z-index: 2; pointer-events: none;
       mix-blend-mode: screen;
       background:
-        radial-gradient(42% 34% at 76% 10%, rgba(255, 138, 190, .16), rgba(255, 138, 190, 0) 70%),
-        radial-gradient(38% 30% at 16% 6%, rgba(160, 136, 255, .18), rgba(160, 136, 255, 0) 72%);
+        radial-gradient(46% 36% at 74% 9%, rgba(255, 138, 190, .22), rgba(255, 138, 190, 0) 70%),
+        radial-gradient(44% 34% at 20% 6%, rgba(168, 144, 255, .26), rgba(168, 144, 255, 0) 72%);
     }
 
     /* ── top bar ──────────────────────────────────────────────────────── */
