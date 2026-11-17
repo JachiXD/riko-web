@@ -9,10 +9,10 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
-import { clamp, approach, emptyChannels } from './gestures.js?v=29';
-import { captureRig, emptyDeltas, measureArms, applyPose, applyLegs, applyFingers } from './rig.js?v=29';
-import { buildVisemePlan, readEmotion, advanceMouth, advanceBlink, applyExpressions } from './face.js?v=29';
-import { playGesture, beginClause, endSpeech, buildChannels, applyChannels } from './motion.js?v=29';
+import { clamp, approach, emptyChannels } from './gestures.js?v=30';
+import { captureRig, emptyDeltas, measureArms, applyPose, applyLegs } from './rig.js?v=30';
+import { buildVisemePlan, readEmotion, advanceMouth, advanceBlink, advanceMood, applyExpressions } from './face.js?v=30';
+import { playGesture, beginClause, endSpeech, buildChannels, applyChannels } from './motion.js?v=30';
 
 const STATES = ['idle', 'listening', 'thinking', 'speaking', 'greeting', 'excited', 'confused', 'error'];
 
@@ -37,8 +37,16 @@ export class Avatar {
     this.ready = false;
     this.greeted = false;
 
-    this.emotion = { happy: 0.1, sad: 0, surprised: 0, angry: 0 };
+    // Expression weights, all fading into each other rather than snapping:
+    // happy and relaxed do most of the work, the rest are small accents.
+    this.emotion = { happy: 0.12, relaxed: 0.14, sad: 0, surprised: 0, angry: 0 };
     this.emotionTarget = { ...this.emotion };
+    this.moodName = 'calm';
+    this.moodWait = 3 + Math.random() * 4;
+    this.browWait = 4 + Math.random() * 5;
+    this.browPulse = 0;
+    this.smileWait = 6 + Math.random() * 6;
+    this.smilePulse = 0;
 
     this.mouth = { aa: 0, ih: 0, ou: 0, ee: 0, oh: 0 };
     this.mouthLevel = 0;
@@ -134,7 +142,9 @@ export class Avatar {
     const span = box.max.y - box.min.y;
     const height = span > 0.3 && span < 20 ? span : 1.6;
     this.frame = { box, height, top: box.max.y, y: box.min.y + height * 0.7 };
-    this.framing = this.framing || 'portrait';
+    // 'face' is the default: her head, hair and shoulders, close enough that
+    // the eyes and mouth are the subject instead of the silhouette.
+    this.framing = this.framing || 'face';
     this.#placeCamera();
 
     addEventListener('resize', () => {
@@ -145,38 +155,43 @@ export class Avatar {
     });
   }
 
-  /** 'portrait' (default, chest up) or 'full' (whole model, still locked). */
+  /**
+   * 'face' (default, head and shoulders), 'portrait' (chest up) or 'full'
+   * (whole model). All three are locked in place; only the distance changes.
+   */
   setFraming(mode) {
-    this.framing = mode === 'full' ? 'full' : 'portrait';
+    this.framing = ['face', 'portrait', 'full'].includes(mode) ? mode : 'face';
     if (this.frame && this.camera) this.#placeCamera();
   }
 
   #placeCamera() {
     const { height, top } = this.frame;
+    const mode = this.framing;
     const vFov = THREE.MathUtils.degToRad(this.camera.fov);
     const halfFov = Math.tan(vFov / 2);
+    const aspect = this.camera.aspect || 1;
 
     // How much of her the frame covers, in fractions of her own height measured
-    // from the top of her head. Portrait cuts just below the chest, which keeps
-    // her hands out of shot without cropping her face.
-    const visible = height * (this.framing === 'full' ? 1.06 : 0.42);
-    const center = this.framing === 'full'
-      ? top - height * 0.5
-      : top - visible * 0.5 + height * 0.05;
+    // from the top of her head. 'face' ends just above her chest, which is the
+    // head, hair and shoulders shot; 'portrait' ends at the waist.
+    const visible = height * (mode === 'full' ? 1.06 : mode === 'portrait' ? 0.42 : 0.34);
+    // A little air above her hair, so blinking and head tilts never crop it.
+    const topEdge = mode === 'full' ? top + height * 0.03 : top + visible * 0.05;
+    const center = mode === 'full' ? top - height * 0.5 : topEdge - visible / 2;
 
-    // Fit vertically, then back off only if the viewport is narrow enough to
-    // clip her shoulders. The result is identical framing on any wide screen and
-    // the same composition, slightly wider, on a phone in portrait.
+    // Fit vertically, then give ground only when the viewport is narrow enough
+    // to cut her shoulders away entirely. A phone crops a little shoulder, which
+    // is what a close-up is meant to do; it never crops her face.
     const distanceForHeight = visible / 2 / halfFov;
-    const aspect = this.camera.aspect || 1;
     const shoulderWidth = height * 0.3;
-    const distanceForWidth = shoulderWidth / 2 / (halfFov * aspect);
-    // Only a little give on narrow screens: at full width-fit her shoulders fit
-    // but her forearms come back into shot, which defeats the framing.
-    const distance = Math.min(Math.max(distanceForHeight, distanceForWidth), distanceForHeight * 1.2);
+    const keepWidth = mode === 'full' ? 1 : mode === 'portrait' ? 0.86 : 0.58;
+    const distanceForWidth = (shoulderWidth * keepWidth) / 2 / (halfFov * aspect);
+    const cap = mode === 'face' ? 1.3 : 1.2;
+    const distance = Math.min(Math.max(distanceForHeight, distanceForWidth), distanceForHeight * cap);
 
     this.frame.distance = distance;
     this.frame.centerY = center;
+    this.frame.visible = visible;
     this.camera.position.set(0, center, distance);
     this.camera.lookAt(0, center, 0);
     this.camera.updateMatrixWorld();
@@ -185,8 +200,18 @@ export class Avatar {
   #setupExpressions() {
     const manager = this.vrm.expressionManager;
     if (!manager) return;
-    const wanted = ['aa', 'ih', 'ou', 'ee', 'oh', 'blink', 'blinkLeft', 'blinkRight', 'happy', 'sad', 'angry', 'surprised', 'relaxed'];
-    for (const key of wanted) if (manager.getExpression(key)) this.available.add(key);
+    const wanted = ['aa', 'ih', 'ou', 'ee', 'oh', 'blink', 'blinkLeft', 'blinkRight', 'happy', 'sad', 'angry', 'surprised', 'relaxed', 'neutral'];
+    // VRM expressions are matched case-insensitively, because this model calls
+    // one of them "Surprised" and a name lookup alone would miss it.
+    this.exprNames = {};
+    const actual = Object.keys(manager.expressionMap || {});
+    for (const key of wanted) {
+      const real = actual.find((name) => name.toLowerCase() === key);
+      if (real) {
+        this.available.add(key);
+        this.exprNames[key] = real;
+      }
+    }
     this.blinkKey = this.available.has('blink');
     this.hasSplitBlink = this.available.has('blinkLeft') && this.available.has('blinkRight');
   }
@@ -216,13 +241,20 @@ export class Avatar {
   }
 
   greet() {
-    playGesture(this, 'wave');
+    // In close-up a wave happens entirely out of frame, so she greets with her
+    // face instead. The wave still fires if anyone asks for the full body.
+    if (this.framing === 'full') playGesture(this, 'wave');
+    this.setEmotion({ happy: 0.55, relaxed: 0.3 });
+    this.deliberateBlink();
     this.setState('greeting');
   }
 
+  // A mood writes the steady expression; a moment like this tints it. Both fade
+  // through the same path, so nothing on her face ever snaps.
   setEmotion(partial) {
-    for (const key in this.emotionTarget) {
-      if (typeof partial[key] === 'number') this.emotionTarget[key] = clamp(partial[key], 0, 1);
+    this.tone = this.tone || { happy: 0, sad: 0, surprised: 0, angry: 0, shy: 0 };
+    for (const key in partial) {
+      if (typeof partial[key] === 'number') this.tone[key] = clamp(partial[key], 0, 1);
     }
   }
 
@@ -237,7 +269,13 @@ export class Avatar {
 
   readTextEmotion(text) {
     const s = String(text || '');
-    this.setEmotion(readEmotion(s));
+    const felt = readEmotion(s);
+    this.setEmotion(felt);
+    // A strong feeling also decides the mood on the spot, rather than waiting
+    // for the next slot.
+    if (felt.shy > 0.2) this.moodName = 'shy';
+    else if (felt.surprised > 0.28) this.moodName = 'surprise';
+    else if (felt.happy > 0.32) this.moodName = 'bright';
     this.reactTo(s);
   }
 
@@ -296,17 +334,20 @@ export class Avatar {
 
     const hipRoll = this.deltas.hips?.z || 0;
     applyPose(this.rig, this.deltas, hipRoll);
-    applyFingers(this.fingers, this.handShape, this.time, this.gestureSeed);
+    // Her hands are out of frame in every close framing, and busy fingers are
+    // the first thing that makes a still body look wrong, so they stay relaxed.
     applyLegs(this.rig, hipRoll, this.channels.legs.knee);
 
+    advanceMood(this, d);
     advanceMouth(this, d);
     advanceBlink(this, d);
     this.#updateGaze(d);
 
+    // Slow enough that every expression reads as a transition, not a switch.
     for (const key in this.emotion) {
-      this.emotion[key] = approach(this.emotion[key], this.emotionTarget[key], 2.4, d);
+      this.emotion[key] = approach(this.emotion[key], this.emotionTarget[key], 1.9, d);
     }
-    applyExpressions(this.vrm, this.available, this.mouth, this.eyeBlink, this.emotion);
+    applyExpressions(this.vrm, this.available, this.mouth, this.eyeBlink, this.emotion, this.moodName, this.exprNames);
 
     this.#watchBoot();
     this.vrm.update(d);
@@ -317,20 +358,25 @@ export class Avatar {
     this.renderer?.render(this.scene, this.camera);
   }
 
+  // Eye contact is the loudest thing on a face at this distance, so she holds
+  // the viewer and only glances away in small, brief darts.
   #updateGaze(d) {
     if (!this.lookTarget) return;
+    const hint = this.moodGaze || { x: 0, y: 0 };
     this.nextIdleLook -= d;
     if (this.nextIdleLook <= 0) {
-      this.nextIdleLook = 1.4 + Math.random() * 3.4;
-      const spread = this.weights.listening > 0.5 ? 0.1 : 0.32;
-      this.lookOffset.set((Math.random() - 0.5) * spread, (Math.random() - 0.5) * spread * 0.4, 0);
+      this.nextIdleLook = this.state === 'thinking' ? 1.1 + Math.random() * 2.2 : 2.2 + Math.random() * 4.2;
+      const spread = this.weights.listening > 0.5 ? 0.05 : 0.13;
+      // Mostly tiny movements that read as saccades, occasionally a real glance.
+      const wide = Math.random() < 0.18 ? 1.9 : 1;
+      this.lookOffset.set((Math.random() - 0.5) * spread * wide, (Math.random() - 0.5) * spread * 0.55 * wide, 0);
     }
-    if (this.state === 'thinking') this.lookOffset.lerp(new THREE.Vector3(-0.35, 0.16, 0), Math.min(1, d * 2));
+    if (this.state === 'thinking') this.lookOffset.lerp(new THREE.Vector3(-0.18, 0.07, 0), Math.min(1, d * 1.4));
     else if (this.state === 'listening') this.lookOffset.lerp(new THREE.Vector3(0, 0, 0), Math.min(1, d * 1.6));
 
     const y = this.gazeY ?? this.frame.y;
-    this.lookAim.set(this.lookOffset.x, y + this.lookOffset.y, 1.1);
-    this.lookTarget.position.lerp(this.lookAim, Math.min(1, d * 6));
+    this.lookAim.set(this.lookOffset.x + hint.x, y + this.lookOffset.y + hint.y, this.lookTarget.position.z);
+    this.lookTarget.position.lerp(this.lookAim, Math.min(1, d * 5));
   }
 
   getMouthShape() {
