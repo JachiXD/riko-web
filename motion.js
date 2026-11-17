@@ -8,7 +8,11 @@
 import {
   clamp, envelope, resetChannels, mixChannels,
   GESTURES, SPEECH_POOL, IDLE_POOL, LISTEN_POOL, THINK_POOL, EXCITED_POOL,
-} from './gestures.js?v=29';
+} from './gestures.js?v=30';
+
+// Her face is the performance now, so the body only hints at what she is
+// doing. Everything from the shoulders down is scaled back hard.
+const BODY = 0.32;
 
 function pick(av, pool) {
   const fresh = pool.filter((n) => !av.recentGestures.slice(-2).includes(n));
@@ -160,15 +164,15 @@ function scheduleGestures(av, d, ch) {
     }
   };
 
-  if (!av.speaking && w.idle > 0.35) queue([5, 12], IDLE_POOL, 0.6 + Math.random() * 0.3);
-  if (!av.speaking && w.listening > 0.5) queue([3.5, 7.5], LISTEN_POOL, 0.5 + Math.random() * 0.25);
-  if (w.thinking > 0.5) queue([2.5, 5], THINK_POOL, 0.7);
-  if (w.excited > 0.5) queue([1.6, 3.4], EXCITED_POOL, 0.85);
+  if (!av.speaking && w.idle > 0.35) queue([8, 16], IDLE_POOL, 0.45 + Math.random() * 0.2);
+  if (!av.speaking && w.listening > 0.5) queue([6, 11], LISTEN_POOL, 0.4 + Math.random() * 0.2);
+  if (w.thinking > 0.5) queue([4, 7], THINK_POOL, 0.5);
+  if (w.excited > 0.5) queue([3, 5], EXCITED_POOL, 0.6);
   if (av.speaking) {
     av.speechGestureWait -= d;
     if (av.speechGestureWait <= 0 && av.gestures.length < 2) {
-      av.speechGestureWait = 2 + Math.random() * 2.5;
-      playGesture(av, pick(av, SPEECH_POOL), 0.7 + Math.random() * 0.25);
+      av.speechGestureWait = 3.4 + Math.random() * 3;
+      playGesture(av, pick(av, SPEECH_POOL), 0.5 + Math.random() * 0.2);
     }
   }
 
@@ -189,11 +193,23 @@ const add = (av, bone, axis, value) => {
   if (entry) entry[axis] += value;
 };
 
+// Her mood moves her head and neck, which is what the camera is actually
+// looking at. It is added on top of the small idle movement, never replacing it.
+function layerMood(av, ch) {
+  ch.head.tilt += av.moodTilt || 0;
+  ch.head.turn += av.moodTurn || 0;
+  ch.head.nod += av.moodNod || 0;
+  // A slow, breathing nod while she holds the viewer's eye.
+  ch.head.nod += Math.sin(av.time * 0.52) * 0.006;
+  ch.head.tilt += Math.sin(av.time * 0.31 + 1.2) * 0.005;
+}
+
 export function buildChannels(av, d) {
   const ch = av.channels;
   resetChannels(ch);
   layerBreathing(av, ch);
   layerPosture(av, ch);
+  layerMood(av, ch);
   layerSpeechLife(av, ch);
   scheduleGestures(av, d, ch);
   layerLegs(av, ch);
@@ -221,10 +237,10 @@ export function applyChannels(av) {
     // Lifting and spreading are the same joint motion here (abduction), so they
     // sum onto the measured outward axis. Outward only: rotating an arm inwards
     // is what pushes it through her torso.
-    const lift = clamp(Math.max(0, c.out) + Math.max(0, c.raise) * 0.85, 0, 1.55);
-    const swing = clamp(c.swing, -0.6, 0.9);
-    const elbow = clamp(c.elbow, 0, 1.5);
-    const wrist = clamp(c.wrist, -1, 1);
+    const lift = clamp(Math.max(0, c.out) + Math.max(0, c.raise) * 0.85, 0, 1.55) * BODY;
+    const swing = clamp(c.swing, -0.6, 0.9) * BODY;
+    const elbow = clamp(c.elbow, 0, 1.5) * (0.55 + BODY * 0.45);
+    const wrist = clamp(c.wrist, -1, 1) * BODY;
 
     add(av, upper, a.out.axis, a.out.sign * lift);
     add(av, upper, a.swing.axis, a.swing.sign * swing);
