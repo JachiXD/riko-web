@@ -99,6 +99,8 @@
       padding: calc(16px + env(safe-area-inset-top)) clamp(16px, 3.4vw, 34px) 0;
       pointer-events: none;
     }
+    /* The name plate is the way into her settings, so the control bar itself
+       stays down to the three things you actually use to talk to her. */
     .brand {
       display: inline-flex; align-items: center; gap: 10px;
       padding: 7px 14px 7px 11px; border-radius: 999px;
@@ -107,7 +109,14 @@
       backdrop-filter: blur(14px) saturate(130%);
       -webkit-backdrop-filter: blur(14px) saturate(130%);
       box-shadow: 0 8px 24px rgba(4, 3, 8, .32);
+      color: inherit; text-align: left; cursor: pointer;
+      pointer-events: auto;
     }
+    .brand:hover {
+      background: rgba(30, 24, 44, .66);
+      border-color: rgba(255, 255, 255, .16);
+    }
+    .brand:active { transform: scale(.985); }
     .brand-dot {
       width: 7px; height: 7px; border-radius: 50%;
       background: linear-gradient(140deg, var(--lavender), var(--pink));
@@ -199,8 +208,8 @@
       50% { box-shadow: 0 12px 30px rgba(164, 133, 232, .3), 0 0 0 9px rgba(255, 158, 203, 0); }
     }
 
-    /* Secondary controls: small glass circles, quiet until you need them. */
-    #kb, #settings {
+    /* Secondary control: one small glass circle, quiet until you need it. */
+    #kb {
       width: 44px; height: 44px; padding: 0;
       display: inline-grid; place-items: center;
       font-size: 15px; line-height: 1;
@@ -211,7 +220,7 @@
       -webkit-backdrop-filter: blur(16px) saturate(130%);
       box-shadow: var(--shadow-sm);
     }
-    #kb:hover, #settings:hover {
+    #kb:hover {
       color: #f4efff; background: rgba(38, 31, 55, .78);
       border-color: var(--stroke-strong); transform: translateY(-1px);
     }
@@ -438,7 +447,7 @@
         font-size: 14px; padding: 12px 14px 13px; border-radius: 16px;
       }
       #mic { min-width: 0; padding: 12px 18px; font-size: 14px; }
-      #kb, #settings { width: 42px; height: 42px; }
+      #kb { width: 42px; height: 42px; }
       #typeform { width: 100%; }
       #status { font-size: 11px; }
     }
@@ -463,11 +472,11 @@
   <div id="glow" aria-hidden="true"></div>
 
   <header id="topbar">
-    <div class="brand">
+    <button id="settings" class="brand" type="button" title="Her voice, brain and memory" aria-label="Her voice, brain and memory">
       <span class="brand-dot" aria-hidden="true"></span>
       <span class="brand-name">Riko</span>
       <span class="brand-sub">companion</span>
-    </div>
+    </button>
   </header>
 
   <div id="hud">
@@ -475,7 +484,6 @@
     <div id="bar">
       <button id="mic" type="button">🎙 Tap to talk</button>
       <button id="kb" type="button" title="Type instead" aria-label="Type instead">⌨</button>
-      <button id="settings" type="button" title="Her voice, brain and memory" aria-label="Settings">⚙</button>
       <button id="unmute" type="button" hidden>🔊 Tap to hear her</button>
       <a id="newtab" href="./" target="_blank" rel="noopener noreferrer" hidden>↗ Open in a new tab</a>
     </div>
