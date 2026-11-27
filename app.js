@@ -4,4 +4,4 @@
 // because the repository's old write path truncated anything over about 17 KB.
 // That path is gone, so the real module is served as itself: readable in the
 // repository, cache-busted by the version on the import below.
-import './app.src.js?v=32';
+import './app.src.js?v=33';

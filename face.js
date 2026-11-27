@@ -97,6 +97,49 @@ export const MOODS = {
     happy: 0.1, relaxed: 0.0, surprised: 0.6, sad: 0.0,
     gaze: { x: 0, y: -0.01 }, tilt: 0.02, turn: 0.0, nod: -0.02,
   },
+  // The moods her personality layer asks for. Each one is a different little
+  // arrangement of the same five expression weights, plus the head and gaze
+  // hints that actually read at this distance.
+  smug: {
+    happy: 0.34, relaxed: 0.3, surprised: 0.02, sad: 0.0, angry: 0.02,
+    gaze: { x: 0.035, y: 0.014 }, tilt: 0.07, turn: 0.026, nod: -0.008,
+  },
+  amused: {
+    happy: 0.68, relaxed: 0.22, surprised: 0.1, sad: 0.0, angry: 0.0,
+    gaze: { x: 0, y: 0.005 }, tilt: 0.042, turn: 0.0, nod: -0.014,
+  },
+  annoyed: {
+    happy: 0.05, relaxed: 0.12, surprised: 0.1, sad: 0.04, angry: 0.22,
+    gaze: { x: -0.03, y: 0.032 }, tilt: -0.06, turn: -0.022, nod: 0.01,
+  },
+  excited: {
+    happy: 0.8, relaxed: 0.06, surprised: 0.16, sad: 0.0, angry: 0.0,
+    gaze: { x: 0, y: -0.01 }, tilt: 0.04, turn: 0.0, nod: -0.016,
+  },
+  disappointed: {
+    happy: 0.02, relaxed: 0.1, surprised: 0.02, sad: 0.34, angry: 0.05,
+    gaze: { x: -0.04, y: 0.042 }, tilt: -0.04, turn: -0.03, nod: 0.02,
+  },
+  competitive: {
+    happy: 0.4, relaxed: 0.08, surprised: 0.06, sad: 0.0, angry: 0.08,
+    gaze: { x: 0.01, y: -0.012 }, tilt: 0.02, turn: 0.012, nod: -0.012,
+  },
+  supportive: {
+    happy: 0.36, relaxed: 0.42, surprised: 0.02, sad: 0.08, angry: 0.0,
+    gaze: { x: 0, y: 0.01 }, tilt: 0.03, turn: 0.0, nod: -0.006,
+  },
+  confused: {
+    happy: 0.05, relaxed: 0.06, surprised: 0.3, sad: 0.02, angry: 0.04,
+    gaze: { x: 0.05, y: -0.02 }, tilt: 0.13, turn: 0.032, nod: 0.012,
+  },
+  playful: {
+    happy: 0.58, relaxed: 0.2, surprised: 0.12, sad: 0.0, angry: 0.0,
+    gaze: { x: 0.025, y: 0.005 }, tilt: 0.05, turn: 0.02, nod: -0.01,
+  },
+  serious: {
+    happy: 0.04, relaxed: 0.16, surprised: 0.0, sad: 0.1, angry: 0.0,
+    gaze: { x: 0, y: 0.02 }, tilt: 0.0, turn: 0.0, nod: 0.006,
+  },
 };
 
 const pick = (list) => list[Math.floor(Math.random() * list.length)];
@@ -109,8 +152,11 @@ export function advanceMood(av, d) {
   // The colour of the words fades out over a few seconds; the mood stays.
   for (const key in tone) tone[key] = approach(tone[key], 0, 0.16, d);
 
+  // A mood she chose on purpose holds for a moment before the idle rotation
+  // is allowed to take the face back.
+  av.moodHold = Math.max(0, (av.moodHold || 0) - d);
   av.moodWait = (av.moodWait ?? 3) - d;
-  if (av.moodWait <= 0) {
+  if (av.moodWait <= 0 && av.moodHold <= 0) {
     av.moodWait = 4.5 + Math.random() * 5.5;
     let pool = ['calm', 'smile', 'smile', 'bright'];
     switch (av.state) {
@@ -153,7 +199,7 @@ export function advanceMood(av, d) {
   target.relaxed = clamp(mood.relaxed + tone.shy * 0.35 + av.smilePulse * 0.08, 0, 1);
   target.surprised = clamp(mood.surprised + tone.surprised * 0.45 + av.browPulse * 0.1, 0, 1);
   target.sad = clamp(mood.sad + tone.sad * 0.5, 0, 1);
-  target.angry = clamp(tone.angry * 0.4, 0, 1);
+  target.angry = clamp((mood.angry || 0) + tone.angry * 0.4, 0, 1);
 
   // Head and gaze hints travel with the mood, smoothed separately.
   const rate = Math.min(1, d * 1.1);
