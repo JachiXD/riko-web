@@ -1,10 +1,14 @@
 /**
  * Groq, reached through the proxy.
  *
- * Shaped like the existing LocalBrain: `reply(messages, { signal })` is an
- * async iterator of text pieces, so the app's streamReply() can swap one for
- * the other without touching the rest of its pipeline. The key lives on the
- * server; this only ever sees text.
+ * `reply(messages, { signal })` is an async iterator of segments, and a segment
+ * is one sentence of her speech with its English subtitle:
+ *
+ *     { ja: 'やっと来た。', en: 'Finally.' }
+ *
+ * The pairing is done on the server, because a half line must never reach the
+ * page: the Japanese is spoken and the English is shown, always together. The
+ * key lives on the server; this only ever sees text.
  */
 
 const DEFAULT_ENDPOINT = 'https://site-43c53528988b4cca8ce63dd3cac24b06.freebuff.page';
@@ -41,7 +45,7 @@ export class GroqBrain {
   }
 
   /**
-   * Stream a reply. Yields plain text pieces as they arrive.
+   * Stream a reply as Japanese + English segments.
    * Errors are thrown so the caller can fall back to its offline brain.
    */
   async *reply(messages, { signal } = {}) {
@@ -94,11 +98,31 @@ export class GroqBrain {
             continue;
           }
           if (payload.error) throw new Error(payload.error);
-          if (payload.delta) yield payload.delta;
+          if (payload.ja && payload.en) yield { ja: payload.ja, en: payload.en };
+          else if (payload.en) yield { ja: '', en: payload.en };
         }
       }
     } finally {
       reader.cancel().catch(() => {});
     }
+  }
+
+  /**
+   * One string through the translation route. Used only when the in-page brain
+   * answered in English and her voice still has to say it in Japanese.
+   */
+  async translate(text, to = 'ja') {
+    if (!this.ready && !(await this.prepare())) throw new Error(this.reason || 'the reply server is not ready');
+    const res = await fetch(`${this.endpoint}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, to }),
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`the translation server answered ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    const out = String(data.text || '').trim();
+    if (!out) throw new Error('the translation came back empty');
+    return out;
   }
 }
