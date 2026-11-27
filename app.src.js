@@ -274,10 +274,24 @@ function showError(message) {
 
 let pendingIntro = null;
 
+/**
+ * voice.unlock(), with a guard. On a page nobody has touched yet the AudioContext
+ * is suspended, and resuming it can leave the promise pending for good instead
+ * of rejecting. Waiting on that would cost her the whole hello, so the wait is
+ * bounded and a blocked context is reported as "not yet".
+ */
+async function unlockVoice(timeout = 900) {
+  const ok = await Promise.race([
+    voice.unlock().catch(() => false),
+    delay(timeout).then(() => false),
+  ]);
+  return ok === true;
+}
+
 /** Speaks one of her introductions in Japanese, with its English line beside it. */
 async function playIntro(intro) {
   showLine('Riko', intro.en);
-  const ok = await voice.unlock().catch(() => false);
+  const ok = await unlockVoice();
   if (!ok) {
     // Browsers hold audio until the page is touched. Keep her subtitle up and
     // say the line the moment that touch arrives.
@@ -758,7 +772,7 @@ function stopEverything() {
 }
 
 async function ensureSound() {
-  const ok = await voice.unlock();
+  const ok = await unlockVoice();
   if (!ok && unmuteBtn) unmuteBtn.hidden = false;
   return ok;
 }
@@ -778,7 +792,7 @@ micBtn.addEventListener('click', async () => {
 });
 
 unmuteBtn?.addEventListener('click', async () => {
-  const ok = await voice.unlock();
+  const ok = await unlockVoice(2500);
   if (ok) {
     unmuteBtn.hidden = true;
     noteStatus('Sound is on.');
@@ -799,11 +813,10 @@ typeForm?.addEventListener('submit', async (event) => {
 });
 
 addEventListener('pointerdown', async () => {
-  const ok = await voice.unlock().catch(() => false);
-  if (ok) resumeIntro();
+  if (await unlockVoice()) resumeIntro();
 }, { once: true });
-addEventListener('keydown', (event) => {
-  voice.unlock().then((ok) => { if (ok) resumeIntro(); }).catch(() => {});
+addEventListener('keydown', async () => {
+  if (await unlockVoice()) resumeIntro();
   if (event.key === 'Escape' && (state === 'speaking' || state === 'thinking')) {
     stopEverything();
   }
@@ -985,12 +998,12 @@ $('voice-retry')?.addEventListener('click', async () => {
 });
 
 $('voice-demo')?.addEventListener('click', async () => {
-  let ok = await voice.unlock();
+  let ok = await unlockVoice(2500);
   if (!ok) {
     // A second attempt inside the same gesture catches contexts that report
     // their old state for a tick after the first resume.
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    ok = await voice.unlock();
+    await delay(150);
+    ok = await unlockVoice(2500);
   }
   if (!ok) {
     if (inFrame) {
