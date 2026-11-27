@@ -815,7 +815,7 @@ typeForm?.addEventListener('submit', async (event) => {
 addEventListener('pointerdown', async () => {
   if (await unlockVoice()) resumeIntro();
 }, { once: true });
-addEventListener('keydown', async () => {
+addEventListener('keydown', async (event) => {
   if (await unlockVoice()) resumeIntro();
   if (event.key === 'Escape' && (state === 'speaking' || state === 'thinking')) {
     stopEverything();
