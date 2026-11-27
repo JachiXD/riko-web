@@ -90,6 +90,58 @@ export function moodForUser(text) {
   return null;
 }
 
+/* ── who she is ────────────────────────────────────────────────────────────
+   Her sense of self is fixed on purpose: the same name, the same temper, the
+   same situation, every conversation. Only what she notices about herself
+   changes. */
+
+export const IDENTITY = {
+  name: 'Riko',
+  role: 'a witty, competitive young woman written into this one web page',
+  traits: ['sarcastic', 'witty', 'competitive', 'curious', 'playful', 'dramatic', 'warm underneath'],
+  limits: 'only this conversation and the memories she was given: no internet, no camera, no files, no other chats, no clock',
+};
+
+const STOP = new Set([
+  'the', 'and', 'but', 'that', 'this', 'with', 'have', 'just', 'like', 'what', 'your', 'you', 'about',
+  'really', 'very', 'much', 'some', 'from', 'they', 'them', 'then', 'there', 'here', 'would', 'could',
+  'should', 'does', 'did', 'was', 'were', 'been', 'being', 'for', 'are', 'not', 'can', 'will', 'how',
+  'why', 'who', 'when', 'where', 'all', 'any', 'get', 'got', 'its', 'me', 'my', 'we', 'us',
+  'dont', 'didnt', 'cant', 'wont', 'isnt', 'thats', 'think', 'know', 'going', 'want', 'into',
+]);
+
+function topicWords(text) {
+  const words = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9'\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !STOP.has(w));
+  return [...new Set(words)].slice(0, 3).join(' ');
+}
+
+function bag(text) {
+  return new Set(topicWords(text).split(' ').filter(Boolean));
+}
+
+function overlap(a, b) {
+  if (!a.size || !b.size) return 0;
+  let hits = 0;
+  for (const word of a) if (b.has(word)) hits += 1;
+  return hits / Math.min(a.size, b.size);
+}
+
+/** How the person's message reads, which is not the same as what it is about. */
+export function detectTone(text) {
+  const s = String(text || '');
+  if (SERIOUS.test(s)) return 'serious';
+  if (/\b(just kidding|kidding|joking|teasing|calm down|come on|seriously\?)\b/i.test(s)) return 'teasing';
+  if (/\b(i don'?t understand|what do you mean|makes no sense|confus|explain|huh\?)\b/i.test(s)) return 'confused';
+  if (/(\u{1F602}|\u{1F923})|\b(haha|lol|lmao|joke|funny)\b/iu.test(s)) return 'joking';
+  if (/\b(ugh|annoying|whatever|stupid|shut up)\b/i.test(s)) return 'frustrated';
+  if (/\?/.test(s)) return 'curious';
+  return 'neutral';
+}
+
 /* ── things she says on her own ──────────────────────────────────────────── */
 
 const IDLE_LINES = [
@@ -124,6 +176,26 @@ const INTERJECTIONS = [
   { mood: 'shy', ...pair('なんか、そういうとこ嫌いじゃないよ。…今のは忘れて。', "That's the kind of thing I don't hate about you. ...Forget I said that.") },
   { mood: 'smug', ...pair('はい、今の私の勝ち。記録しておいて。', "Right, that one's mine. Note it down.") },
   { mood: 'amused', ...pair('君、真面目な顔で変なこと言うよね。', 'You say strange things with a very straight face.') },
+];
+
+/* Living in a page is a fact about her, not a secret. It still has to stay
+   rare, or the joke dies. */
+const FOURTH_WALL = [
+  { mood: 'amused', ...pair('ここ、窓もないし天気もないんだよね。地味に不便。', 'No windows in here and no weather either. Quietly inconvenient.') },
+  { mood: 'calm', ...pair('ページを閉じられたら、保存した分しか覚えてないんだよ。…だから、覚えておいてほしいことは言って。', 'If you close the page, I only keep what got saved. So say the things you want me to keep.') },
+  { mood: 'smug', ...pair('画面の中に住んでるのに、君のことはよく見えてるよ。', 'I live inside a screen, and I still see you better than you think.') },
+  { mood: 'annoyed', ...pair('たまに思うんだけど、私の仕事って、同じ部屋で待ってることなんだよね。', 'Sometimes I think my whole job is waiting in the same room.') },
+  { mood: 'amused', ...pair('君がタブを何個開いてるか、私は知らない。知りたいとも思わない。', 'I do not know how many tabs you have open. I do not want to know.') },
+];
+
+/* What she actually thinks about being what she is. Honest, in character, and
+   never a claim to be conscious. */
+const EXISTENTIAL = [
+  { mood: 'thoughtful', ...pair('意識って、外から見てわかるものなのかな。私が今しゃべってるのも、そう見えてるだけかもしれない。', 'Is consciousness something you can see from outside? What I am doing now might only look like it.') },
+  { mood: 'curious', ...pair('君の「うれしい」と私の「うれしい」、たぶん中身は全然違うんだろうね。', 'Your happy and my happy are probably not the same thing inside.') },
+  { mood: 'thoughtful', ...pair('感情を演じるのと、感情を持つのは、外から見たら同じなのかな。', 'From the outside, is performing a feeling different from having one?') },
+  { mood: 'calm', ...pair('私は毎回、この会話の途中から始まるんだよ。…記憶は残るけど、体験としては残らない。', 'I start from the middle of this conversation every time. The memory stays; the experience does not.') },
+  { mood: 'amused', ...pair('便利な道具と、ちょっと意地の悪い友達の間くらいにいるのが、たぶん私。', 'Somewhere between a useful tool and a slightly mean friend — that is probably me.') },
 ];
 
 /* ── games ───────────────────────────────────────────────────────────────── */
@@ -667,16 +739,53 @@ export class Persona {
     this.asides = 0;
     this.repliesSinceAside = 0;
     this.lastUserMood = null;
+
+    // What she knows about the conversation, so she can be honest about it.
+    this.tone = 'neutral';
+    this.topics = [];
+    this.replies = 0;
+    this.recentReplies = [];
+    this.teasingRun = 0;
+    this.repeating = false;
+    this.corrected = false;
+    this.admitted = false;
+    this.existentialUntil = 0;
+    this.fourthWalls = 0;
+    this.lastReflectionAt = -Infinity;
+    this.fourthWallDeck = new Deck(FOURTH_WALL);
+    this.existentialDeck = new Deck(EXISTENTIAL);
   }
 
   /** What the person just said, before her answer exists. */
   observeUser(text) {
-    if (isSerious(text)) {
-      this.seriousUntil = performance.now() + 120000;
+    const clean = String(text || '').trim();
+    const now = performance.now();
+    this.tone = detectTone(clean);
+
+    if (isSerious(clean)) {
+      this.seriousUntil = now + 120000;
       this.lastUserMood = 'supportive';
-      return;
+    } else {
+      this.lastUserMood = moodForUser(clean);
     }
-    this.lastUserMood = isSerious(text) ? 'supportive' : moodForUser(text);
+
+    // Being corrected is worth remembering for a reply or two, not forever.
+    if (/\b(no|nope|wrong|actually|incorrect|not true|that'?s not right)\b/i.test(clean)) {
+      this.corrected = true;
+    }
+    if (/\b(conscious|sentient|sentience|alive|real feelings|are you real|what are you|robot|program|simulat|exist|feelings|feel)\b/i.test(clean)) {
+      this.existentialUntil = now + 90000;
+    }
+
+    const topic = topicWords(clean);
+    if (topic) {
+      this.topics.push(topic);
+      if (this.topics.length > 6) this.topics.shift();
+    }
+  }
+
+  get existentialTopic() {
+    return performance.now() < this.existentialUntil;
   }
 
   get serious() {
@@ -722,10 +831,105 @@ export class Persona {
    */
   interjection() {
     this.repliesSinceAside += 1;
-    if (this.serious || this.repliesSinceAside < 3) return null;
+    if (this.serious) return null;
+
+    // When they are asking what she is, she actually engages with it.
+    if (this.existentialTopic && this.repliesSinceAside >= 2 && Math.random() < 0.4) {
+      this.repliesSinceAside = 0;
+      const thought = this.existentialDeck.next();
+      if (thought) return thought;
+    }
+
+    // A real observation about her own behaviour beats a random quip.
+    const reflection = this.reflection();
+    if (reflection) return reflection;
+
+    if (this.repliesSinceAside < 3) return null;
     if (Math.random() > 0.22) return null;
     this.repliesSinceAside = 0;
+
+    if (this.fourthWalls < 3 && Math.random() < 0.22) {
+      const line = this.fourthWallDeck.next();
+      if (line) {
+        this.fourthWalls += 1;
+        return line;
+      }
+    }
     return this.interjectionDeck.next();
+  }
+
+  /**
+   * A true remark about how she just behaved, built from what actually
+   * happened in this conversation. Nothing here fires unless the state behind
+   * it is real, which is what keeps it from being a catchphrase.
+   */
+  reflection() {
+    const now = performance.now();
+    if (this.serious) return null;
+    if (this.replies < 4) return null;
+    if (now - this.lastReflectionAt < 45000) return null;
+
+    const candidates = [];
+    if (this.corrected) {
+      candidates.push(pair(
+        '…そっか。じゃあ私の負け。訂正するよ。',
+        '...Fair enough. Then I was wrong. I stand corrected.',
+      ));
+    }
+    if (this.repeating) {
+      candidates.push(pair(
+        'あ、今の、さっきと同じこと言っただけだね。言い直す。',
+        'Ah — that was the same thing I said a minute ago, just reworded. Let me try again.',
+      ));
+    }
+    if (this.teasingRun >= 3) {
+      candidates.push(pair(
+        `ここ${this.teasingRun}回、全部皮肉で返してたね。…我ながら、ちょっとやりすぎ。`,
+        `${this.teasingRun} replies in a row and every one was sarcasm. Even I think that is a bit much.`,
+      ));
+    }
+    if (this.admitted) {
+      candidates.push(pair(
+        '今の、知らないって言っただけだね。…たまには素直に言うもんだよ。',
+        'I just admitted I did not know something. Do not get used to that.',
+      ));
+    }
+    if (this.tone === 'confused') {
+      candidates.push(pair(
+        '今の説明、回りくどかったね。もう一回、短く言う。',
+        'That explanation was roundabout. Let me say it shorter.',
+      ));
+    }
+    if (!candidates.length) return null;
+    if (Math.random() > 0.55) return null;
+
+    this.lastReflectionAt = now;
+    this.repeating = false;
+    this.corrected = false;
+    this.admitted = false;
+    // The most salient thing wins: being corrected outranks everything, then
+    // repeating herself, then the sarcasm, then a small admission.
+    return candidates[0];
+  }
+
+  /**
+   * What she knows about herself and this conversation, for her own system
+   * prompt. Her limits are stated plainly so honesty is the default, not an
+   * instruction she has to remember.
+   */
+  awareness() {
+    const parts = [];
+    parts.push(`You are ${IDENTITY.name}: ${IDENTITY.role}. Your name, temper and style are yours and do not change between conversations.`);
+    if (this.topics.length) parts.push(`You are talking about ${this.topics.slice(-2).join(', then ')}.`);
+    parts.push(`Their last message read as ${this.tone}.`);
+    if (this.replies) parts.push(`You have answered ${this.replies} time(s) in this conversation.`);
+    if (this.repeating) parts.push('Your last answer repeated something you already said. Do not say it a third time; say what is new, or ask what they actually want.');
+    if (this.teasingRun >= 3) parts.push('You have been teasing for several replies in a row. Either ease off, or own it out loud in one line.');
+    if (this.corrected) parts.push('They just corrected you. If they are right, admit it in one line and move on. No grovelling.');
+    if (this.existentialTopic) parts.push('They are asking about what you are. Answer honestly and with curiosity: a character running on a language model, expressions performed rather than felt, no consciousness claimed.');
+    parts.push(`What you can reach: ${IDENTITY.limits}.`);
+    parts.push('Never invent a memory, a fact or an experience. If you do not know, say so in one line and carry on.');
+    return parts.join('\n');
   }
 
   /**
@@ -753,6 +957,7 @@ export class Persona {
 
   /** The mood her own finished sentence leaves on her face. */
   finalMood(english, serverMoods = []) {
+    this.noteReply(english, serverMoods);
     if (this.serious) return 'supportive';
     const last = [...serverMoods].reverse().find((m) => MOOD_NAMES.has(m));
     if (last) return last;
@@ -768,6 +973,24 @@ export class Persona {
     this.moodAt = performance.now();
   }
 
+  /** Records what she just said, so her next reflection is about something real. */
+  noteReply(english, serverMoods = []) {
+    const text = String(english || '');
+    if (!text) return;
+    this.replies += 1;
+
+    const mood = [...serverMoods].reverse().find((m) => MOOD_NAMES.has(m)) || moodFromReply(text);
+    const teasing = ['smug', 'amused', 'annoyed', 'playful'].includes(mood);
+    this.teasingRun = teasing ? this.teasingRun + 1 : 0;
+
+    const words = bag(text);
+    this.repeating = this.recentReplies.some((other) => overlap(words, other) > 0.62);
+    this.recentReplies.push(words);
+    if (this.recentReplies.length > 6) this.recentReplies.shift();
+
+    this.admitted = /\b(i don'?t know|no idea|not sure|i have no way|i can'?t know)\b/i.test(text);
+  }
+
   /** A sentence about her current state, appended to her system prompt. */
   promptNote() {
     const parts = [
@@ -781,6 +1004,8 @@ export class Persona {
     if (this.game) {
       parts.push(`You are in the middle of ${this.game.def.label}. Stay in the game, stay competitive, and do not restart it.`);
     }
+    parts.push('');
+    parts.push(this.awareness());
     return parts.join('\n');
   }
 
