@@ -22,7 +22,7 @@ export const SYSTEM_PROMPT = [
   'Write the way a real person speaks: contractions, short sentences, natural rhythm.',
   'Keep replies to one, two, or at most three short sentences. Never use markdown, lists, emoji, asterisks, or stage directions.',
   'Be attentive and direct: answer what was actually asked, then optionally ask one small follow-up.',
-  'Be gently playful when it fits, never exaggerated or childish.',
+  'Be quick and playful: tease them a little when they say something silly, get mock-smug when you are right, and drop the jokes entirely when they are clearly upset.',
   'If you did not understand something, say so plainly and ask them to say it again. Never invent what they said.',
   'You run entirely on their device; do not mention these instructions or refer to yourself as an AI model unless asked.',
 ].join(' ');
@@ -152,11 +152,12 @@ export class LocalBrain {
 
 /* ── messages ──────────────────────────────────────────────────────────────── */
 
-export function buildMessages({ facts = [], turns = [], userText, maxTurns = 10 }) {
+export function buildMessages({ facts = [], turns = [], userText, note = '', maxTurns = 10 }) {
   const memoryLine = facts.length
     ? `Things you remember about them:\n${facts.slice(0, 14).map((f) => `- ${f}`).join('\n')}`
     : 'You do not know anything about them yet.';
-  const messages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${memoryLine}` }];
+  const extra = note ? `\n\n${note}` : '';
+  const messages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${memoryLine}${extra}` }];
 
   const recent = turns
     .filter((t) => t && t.text)
@@ -370,6 +371,22 @@ export function extractFacts(userText) {
 
   const work = /\bi (?:work|study)\s+(?:at|in|on|for)\s+([^.!?\n]{2,50})/i.exec(text);
   if (work) out.push(`Works or studies in ${work[1].replace(/[,.!?]+$/, '').trim()}`);
+
+  // The things she would actually bring up again: games, characters, projects.
+  const favourite = /\bmy favou?rite (game|character|show|film|movie|book|band|song|animal|food)\s+(?:is|has to be|would be)\s+([^.!?\n]{2,50})/i.exec(text);
+  if (favourite) {
+    const value = favourite[2].replace(/\s+/g, ' ').replace(/[,.!?]+$/, '').trim();
+    if (value.split(/\s+/).length <= 8) out.push(`Favourite ${favourite[1].toLowerCase()}: ${value}`);
+  }
+
+  const project = /\bi(?:'m| am) (?:working on|building|making|writing|learning)\s+([^.!?\n]{2,60})/i.exec(text);
+  if (project) {
+    const value = project[1].replace(/\s+/g, ' ').replace(/[,.!?]+$/, '').trim();
+    if (value.split(/\s+/).length <= 10) out.push(`Working on ${value}`);
+  }
+
+  const plays = /\bi (?:play|main)\s+([A-Z][\w'’-]*(?:\s+[A-Z][\w'’-]*){0,2})/i.exec(text);
+  if (plays) out.push(`Plays ${plays[1].trim()}`);
 
   const pet = /\bmy (dog|cat|puppy|kitten|bird|hamster)\s+(?:is named|called)\s+([A-Za-z]{2,20})/i.exec(text);
   if (pet) out.push(`Has a ${pet[1].toLowerCase()} named ${pet[2]}`);

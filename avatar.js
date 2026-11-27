@@ -11,7 +11,7 @@ import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 
 import { clamp, approach, emptyChannels } from './gestures.js?v=30';
 import { captureRig, emptyDeltas, measureArms, applyPose, applyLegs } from './rig.js?v=30';
-import { buildVisemePlan, readEmotion, advanceMouth, advanceBlink, advanceMood, applyExpressions } from './face.js?v=30';
+import { buildVisemePlan, readEmotion, advanceMouth, advanceBlink, advanceMood, applyExpressions, MOODS } from './face.js?v=31';
 import { playGesture, beginClause, endSpeech, buildChannels, applyChannels } from './motion.js?v=30';
 
 const STATES = ['idle', 'listening', 'thinking', 'speaking', 'greeting', 'excited', 'confused', 'error'];
@@ -265,6 +265,19 @@ export class Avatar {
     const puzzled = /(not sure|i do not know|confus|what do you mean|hmm)/i.test(s);
     if (excited) this.setState('excited');
     else if (puzzled) this.setState('confused');
+  }
+
+  /**
+   * Holds one mood on her face for a few seconds, chosen by her personality
+   * layer. Names are the ones face.js knows; an unknown one is ignored rather
+   * than allowed to blank her expression.
+   */
+  applyMood(name, hold = 5) {
+    if (!MOODS[name]) return false;
+    this.moodName = name;
+    this.moodHold = clamp(hold, 0.5, 20);
+    this.moodWait = this.moodHold;
+    return true;
   }
 
   readTextEmotion(text) {
