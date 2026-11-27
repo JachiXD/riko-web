@@ -6,13 +6,14 @@
 // Her speech is Japanese and her subtitles are English. The two travel together
 // as segments from her server, so nothing can be said without being read.
 
-import { Avatar } from './avatar.js?v=29';
+import { Avatar } from './avatar.js?v=30';
 import { Voice } from './voice.js?v=30';
 import { Ears } from './ears.js?v=29';
 import { Memory } from './memory.js?v=29';
-import { LocalBrain, LOCAL_MODELS, buildMessages, reflexReply, extractFacts } from './brain.js?v=29';
+import { LocalBrain, LOCAL_MODELS, buildMessages, reflexReply, extractFacts } from './brain.js?v=30';
 import { GroqBrain } from './groq-brain.js?v=30';
 import { FishVoice } from './fish-voice.js?v=29';
+import { Persona } from './persona.js?v=1';
 
 const $ = (id) => document.getElementById(id);
 
@@ -106,6 +107,9 @@ let bootDone = false;
 let speakingSince = 0;
 let avatarInfo = null;
 let gpuSupport = null;
+// Spontaneity is paced from real activity, not from the last message alone.
+let lastActivityAt = performance.now();
+let soundUnlocked = false;
 
 const avatar = new Avatar(host);
 const localVoice = new Voice({
@@ -185,6 +189,9 @@ const voice = {
 };
 
 const memory = new Memory();
+// Her personality: the mood on her face, the games she runs herself, and the
+// remarks she makes into a room that has gone quiet.
+const persona = new Persona();
 const ears = new Ears({
   // English in, as always: she understands what you say, she just answers in
   // Japanese.
@@ -285,6 +292,7 @@ async function unlockVoice(timeout = 900) {
     voice.unlock().catch(() => false),
     delay(timeout).then(() => false),
   ]);
+  if (ok === true) soundUnlocked = true;
   return ok === true;
 }
 
@@ -327,6 +335,51 @@ function resumeIntro() {
   const intro = pendingIntro;
   pendingIntro = null;
   playIntro(intro);
+}
+
+/**
+ * Speaks a short exchange that did not come from her server: a game turn, a
+ * spontaneous remark. Same path as a reply — Japanese to the voice, English to
+ * the subtitle, one bridge, so two of her lines can never overlap.
+ */
+function speakPairs(pairs, { mood = null, remember = true } = {}) {
+  const list = (pairs || []).filter((p) => p && p.en);
+  if (!list.length) return;
+
+  const run = ++runToken;
+  abortController?.abort();
+  abortController = null;
+  bridge?.cancel();
+  voice.stop();
+  ears.cancel();
+  avatar.endSpeech();
+
+  const speech = new SpeechBridge(run, () => {
+    if (run !== runToken) return;
+    avatar.endSpeech();
+    if (state === 'speaking' || state === 'thinking') setState('idle');
+  });
+  bridge = speech;
+
+  let full = '';
+  for (const item of list) {
+    full = full ? `${full} ${item.en}` : item.en;
+    showLine('Riko', full);
+    if (item.ja) speech.push(item.ja);
+  }
+  speech.finish();
+
+  const english = full.trim();
+  // Mood and gestures are read off the English, because that is the half this
+  // file can understand without its own Japanese tokeniser.
+  avatar.readTextEmotion(english);
+  if (mood) avatar.applyMood(mood, 6);
+  lastActivityAt = performance.now();
+
+  if (remember) {
+    const joined = list.map((p) => (p.ja ? `${p.ja} ||| ${p.en}` : p.en)).join('\n');
+    memory.addTurn('riko', joined).catch(() => {});
+  }
 }
 
 /* ── boot ── */
@@ -496,6 +549,21 @@ function frame(now) {
     setState('idle');
     setStatus('That answer took too long, so I stopped waiting on it. Ask me again?');
   }
+
+  // She is company, not a notification: into a quiet page, only now and then,
+  // and never while the person is typing or reading her panel.
+  if (bootDone) {
+    const aside = persona.idleAside(now, {
+      idleFor: now - lastActivityAt,
+      unlocked: soundUnlocked,
+      busy:
+        state !== 'idle' ||
+        document.hidden ||
+        (typeForm && !typeForm.hidden) ||
+        panelEl?.classList.contains('open'),
+    });
+    if (aside) speakPairs([aside], { mood: aside.mood });
+  }
 }
 
 /* ── speech queue ── */
@@ -580,7 +648,7 @@ async function* streamReply(userText, signal) {
   // Groq first: it is the brain she is supposed to have. It answers in
   // Japanese + English pairs, one segment per sentence.
   if (cloud.ready) {
-    const messages = buildMessages({ facts, turns, userText });
+    const messages = buildMessages({ facts, turns, userText, note: persona.promptNote() });
     let produced = false;
     try {
       for await (const segment of cloud.reply(messages, { signal })) {
@@ -601,7 +669,7 @@ async function* streamReply(userText, signal) {
   // their answer is translated once before it is spoken.
   let english = '';
   if (local.ready) {
-    const messages = buildMessages({ facts, turns, userText });
+    const messages = buildMessages({ facts, turns, userText, note: persona.promptNote() });
     try {
       for await (const piece of local.reply(messages, { signal })) english += piece;
     } catch (err) {
@@ -636,9 +704,20 @@ async function handleUser(raw) {
 
   showLine('You', text);
   setState('thinking');
+  lastActivityAt = performance.now();
+  persona.observeUser(text);
 
   await memory.addTurn('user', text);
   for (const fact of extractFacts(text)) await memory.addFact(fact, 'auto');
+
+  // Games she runs herself need a referee, not a language model: the turns are
+  // already written as pairs, so a game never depends on the network.
+  const gameTurn = persona.route(text);
+  if (gameTurn) {
+    if (gameTurn.fact) await memory.addFact(gameTurn.fact, 'game');
+    speakPairs(gameTurn.pairs, { mood: gameTurn.mood });
+    return;
+  }
 
   const run = runToken;
   const abort = new AbortController();
@@ -668,15 +747,31 @@ async function handleUser(raw) {
         spoken++;
         speech.push(segment.ja);
       }
+      if (segment.mood) {
+        avatar.applyMood(segment.mood, 5);
+        persona.seeMood(segment.mood);
+      }
     }
 
     if (run !== runToken) return;
+
+    // Occasionally she adds a thought of her own to the end of her answer, so
+    // an ordinary exchange does not stay ordinary.
+    const aside = persona.interjection();
+    if (aside) {
+      full = `${full} ${aside.en}`;
+      showLine('Riko', full);
+      speech.push(aside.ja);
+      pairs.push(`${aside.ja} ||| ${aside.en}`);
+    }
+
     const subtitle = full.trim();
     if (!subtitle) throw new Error('the reply was empty');
     showLine('Riko', subtitle);
     // Mood and gestures are read off the English, because that is the half this
     // file can understand without its own Japanese tokeniser.
     avatar.readTextEmotion(subtitle);
+    avatar.applyMood(persona.finalMood(subtitle), 6);
     avatar.reactTo(subtitle);
     await memory.addTurn('riko', pairs.length ? pairs.join('\n') : subtitle);
     if (!spoken) noteStatus('Her voice is out of reach, so that one is on screen only.');
@@ -813,8 +908,12 @@ typeForm?.addEventListener('submit', async (event) => {
 });
 
 addEventListener('pointerdown', async () => {
+  lastActivityAt = performance.now();
   if (await unlockVoice()) resumeIntro();
 }, { once: true });
+// Any touch at all postpones her next unprompted remark.
+addEventListener('pointerdown', () => { lastActivityAt = performance.now(); }, { passive: true });
+addEventListener('keydown', () => { lastActivityAt = performance.now(); });
 addEventListener('keydown', async (event) => {
   if (await unlockVoice()) resumeIntro();
   if (event.key === 'Escape' && (state === 'speaking' || state === 'thinking')) {
@@ -1160,6 +1259,18 @@ window.riko = {
   },
   get gestureCount() {
     return avatar.gestures.length;
+  },
+  get mood() {
+    return avatar.moodName;
+  },
+  get game() {
+    return persona.gameLabel;
+  },
+  get asides() {
+    return persona.asides;
+  },
+  get persona() {
+    return persona;
   },
   get speechPlan() {
     return avatar.plan.length;
